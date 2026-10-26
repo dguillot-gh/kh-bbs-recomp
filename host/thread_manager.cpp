@@ -1,0 +1,654 @@
+#include "thread_manager.hpp"
+
+#include "psprecomp/common.hpp"
+
+#include <algorithm>
+#include <cstdlib>
+#include <iostream>
+#include <limits>
+#include <vector>
+
+namespace bbs {
+namespace {
+ThreadManager *g_thread_manager{};
+
+void set_success(psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); }
+void set_error(psprecomp::AllegrexContext &ctx, std::uint32_t error) { ctx.set_gpr(2u, error); }
+bool thread_diag_enabled() {
+    return std::getenv("PSPRECOMP_THREAD_DIAG") != nullptr ||
+        std::getenv("PSPRECOMP_TRACE") != nullptr;
+}
+}
+
+void ThreadManager::initialize(psprecomp::Runtime &runtime,
+                               std::uint32_t initial_stack_pointer) {
+    runtime_ = &runtime;
+    current_uid_ = 0;
+    next_uid_ = 1;
+    next_lw_mutex_uid_ = 0x500;
+    next_semaphore_uid_ = 0x600;
+    next_message_pipe_uid_ = 0x700;
+    next_stack_top_ = 0x09FF0000u;
+    next_ready_sequence_ = 1u;
+    threads_.clear();
+    ready_.clear();
+    end_waiters_.clear();
+    semaphores_.clear();
+    message_pipes_.clear();
+
+    Thread main{};
+    main.name = "module_start";
+    main.priority = 32u;
+    main.state = State::Running;
+    main.stack_top = 0x0A000000u;
+    main.stack_bottom = 0x09FF0000u;
+    main.context = runtime.cpu();
+    threads_.emplace(0, std::move(main));
+    runtime.memory().zero(0x09FF0000u, 0x10000u);
+    runtime.cpu().set_gpr(26u, 0x09FFFF00u);
+    runtime.cpu().set_gpr(29u, initial_stack_pointer);
+
+    g_thread_manager = this;
+    runtime.register_function(0u, &ThreadManager::thread_return_trampoline,
+                              "psp_thread_return");
+    psprecomp::set_runtime_thread_identity(0, "module_start");
+}
+
+void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
+    runtime.register_hle("ThreadManForUser", 0x446D8DE6u,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { create_thread(rt, ctx); });
+    runtime.register_hle("ThreadManForUser", 0xF475845Du,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { start_thread(rt, ctx); });
+    runtime.register_hle("ThreadManForUser", 0x809CE29Bu,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { exit_delete_thread(rt, ctx); });
+    runtime.register_hle("ThreadManForUser", 0x278C0DF5u,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { wait_thread_end(rt, ctx); });
+    runtime.register_hle("ThreadManForUser", 0x293B45B8u,
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            ctx.set_gpr(2u, static_cast<std::uint32_t>(current_uid_));
+        });
+    runtime.register_hle("ThreadManForUser", 0x19CFF145u,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const std::uint32_t work = ctx.gpr[4u];
+            if (work == 0u || !rt.memory().contains(work, 32u)) {
+                set_error(ctx, 0x80020190u); return;
+            }
+            const std::uint32_t initial_count = ctx.gpr[7u];
+            rt.memory().zero(work, 32u);
+            rt.memory().store32(work, initial_count);
+            rt.memory().store32(work + 4u, initial_count != 0u ? static_cast<std::uint32_t>(current_uid_) : 0u);
+            rt.memory().store32(work + 8u, ctx.gpr[6u]);
+            rt.memory().store32(work + 12u, 0u);
+            rt.memory().store32(work + 16u, static_cast<std::uint32_t>(next_lw_mutex_uid_++));
+            set_success(ctx);
+        });
+    runtime.register_hle("ThreadManForUser", 0x60107536u,
+        [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const std::uint32_t work = ctx.gpr[4u];
+            if (work == 0u || !rt.memory().contains(work, 20u)) {
+                set_error(ctx, 0x80020190u); return;
+            }
+            rt.memory().zero(work, 20u);
+            set_success(ctx);
+        });
+    runtime.register_hle("ThreadManForUser", 0xD6DA4BA1u,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const auto initial = static_cast<std::int32_t>(ctx.gpr[6u]);
+            const auto maximum = static_cast<std::int32_t>(ctx.gpr[7u]);
+            if (maximum <= 0 || initial < 0 || initial > maximum) {
+                set_error(ctx, 0x800201B0u); return;
+            }
+            const std::int32_t uid = next_semaphore_uid_++;
+            semaphores_.emplace(uid, Semaphore{initial, maximum});
+            if (thread_diag_enabled()) {
+                const std::string name = ctx.gpr[4u] != 0u
+                    ? rt.memory().read_c_string(ctx.gpr[4u], 64u) : "semaphore";
+                std::cerr << "[pw-thread] create-sema uid=" << uid << " name=\"" << name
+                          << "\" initial=" << initial << " max=" << maximum << "\n";
+            }
+            ctx.set_gpr(2u, static_cast<std::uint32_t>(uid));
+        });
+    runtime.register_hle("ThreadManForUser", 0x3F53E640u,
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto amount = static_cast<std::int32_t>(ctx.gpr[5u]);
+            const auto it = semaphores_.find(uid);
+            if (it == semaphores_.end()) { set_error(ctx, 0x80020199u); return; }
+            if (amount <= 0 || static_cast<std::int64_t>(it->second.count) + amount > it->second.maximum) {
+                set_error(ctx, 0x800201B0u); return;
+            }
+            it->second.count += amount;
+            set_success(ctx);
+        });
+    runtime.register_hle("ThreadManForUser", 0x4E3A1105u,
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto amount = static_cast<std::int32_t>(ctx.gpr[5u]);
+            const auto it = semaphores_.find(uid);
+            if (it == semaphores_.end()) { set_error(ctx, 0x80020199u); return; }
+            if (amount <= 0 || amount > it->second.maximum) { set_error(ctx, 0x800201B0u); return; }
+            if (it->second.count < amount) { set_error(ctx, 0x800201A8u); return; }
+            it->second.count -= amount;
+            set_success(ctx);
+        });
+    runtime.register_hle("ThreadManForUser", 0x28B6489Cu,
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            if (semaphores_.erase(uid) == 0u) { set_error(ctx, 0x80020199u); return; }
+            set_success(ctx);
+        });
+    runtime.register_hle("ThreadManForUser", 0x912354A7u,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const std::uint32_t priority = ctx.gpr[4u];
+            const auto current = threads_.find(current_uid_);
+            if (current == threads_.end() || current->second.priority != priority) {
+                set_success(ctx);
+                return;
+            }
+            const bool peer_ready = std::any_of(ready_.begin(), ready_.end(), [this, priority](const ReadyItem &item) {
+                const auto found = threads_.find(item.uid);
+                return found != threads_.end() && found->second.state == State::Ready &&
+                    found->second.priority == priority;
+            });
+            if (!peer_ready) { set_success(ctx); return; }
+            psprecomp::AllegrexContext yielded = ctx;
+            yielded.set_gpr(2u, 0u);
+            yielded.pc = ctx.gpr[31u];
+            enqueue(current_uid_, yielded);
+            (void)activate_next(rt, ctx, "rotate-ready-queue");
+        });
+    const auto wake_pipe_waiters = [this](std::vector<std::int32_t> &waiters) {
+        for (const std::int32_t uid : waiters) {
+            const auto found = threads_.find(uid);
+            if (found != threads_.end() && found->second.state == State::Sleeping)
+                enqueue(uid, found->second.context);
+        }
+        waiters.clear();
+    };
+    const auto trace_pipe_io = [](psprecomp::Runtime &rt, const char *op, const MessagePipe &pipe,
+                                  std::int32_t uid, std::uint32_t requested, std::uint32_t amount,
+                                  std::uint32_t mode, std::uint32_t buffer) {
+        static std::uint32_t traces = 0u;
+        if (thread_diag_enabled() && traces++ < 160u) {
+            std::cerr << "[pw-msgpipe] " << op << " uid=" << uid << " name=\"" << pipe.name
+                      << "\" request=" << requested << " moved=" << amount << " queued="
+                      << pipe.bytes.size() << "/" << pipe.capacity << " mode=" << mode << " data=";
+            const auto shown = std::min(amount, 16u);
+            for (std::uint32_t i = 0; i < shown; ++i)
+                std::cerr << (i ? " " : "") << std::hex << static_cast<unsigned>(rt.memory().load8(buffer + i));
+            std::cerr << std::dec << "\n";
+        }
+    };
+    const auto suspend_pipe_waiter = [this](psprecomp::Runtime &rt,
+                                            psprecomp::AllegrexContext &ctx,
+                                            std::vector<std::int32_t> &waiters,
+                                            const char *reason) {
+        const std::int32_t uid = current_uid_;
+        const auto current = threads_.find(uid);
+        if (current == threads_.end()) { rt.stop("Message-pipe wait without a PSP thread"); return; }
+        psprecomp::AllegrexContext suspended = ctx;
+        suspended.pc = ctx.pc; // Re-enter the import once the pipe can satisfy it.
+        current->second.state = State::Sleeping;
+        current->second.context = suspended;
+        if (std::find(waiters.begin(), waiters.end(), uid) == waiters.end()) waiters.push_back(uid);
+        if (!activate_next(rt, ctx, reason))
+            rt.stop(std::string("Peace Walker message-pipe deadlock waiting on ") + reason);
+    };
+    runtime.register_hle("ThreadManForUser", 0x7C0DC2A0u,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const std::uint32_t size = ctx.gpr[7u];
+            if (size == 0u || size > 0x10000000u) { set_error(ctx, 0x80020190u); return; }
+            const std::int32_t uid = next_message_pipe_uid_++;
+            const std::string name = ctx.gpr[4u] != 0u
+                ? rt.memory().read_c_string(ctx.gpr[4u], 64u) : "message-pipe";
+            message_pipes_.emplace(uid, MessagePipe{name, size, {}});
+            if (thread_diag_enabled())
+                std::cerr << "[pw-thread] create-msgpipe uid=" << uid << " name=\"" << name
+                          << "\" part=" << ctx.gpr[5u] << " attr=0x" << std::hex << ctx.gpr[6u]
+                          << " size=0x" << size << std::dec << "\n";
+            ctx.set_gpr(2u, static_cast<std::uint32_t>(uid));
+        });
+    runtime.register_hle("ThreadManForUser", 0xF0B7DA1Cu,
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            if (message_pipes_.erase(uid) == 0u) { set_error(ctx, 0x80020199u); return; }
+            set_success(ctx);
+        });
+    runtime.register_hle("ThreadManForUser", 0x876DBFADu,
+        [this, wake_pipe_waiters, suspend_pipe_waiter, trace_pipe_io](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto found = message_pipes_.find(uid);
+            const std::uint32_t source = ctx.gpr[5u];
+            const std::uint32_t size = ctx.gpr[6u];
+            if (found == message_pipes_.end() || size == 0u || !rt.memory().contains(source, size)) {
+                set_error(ctx, found == message_pipes_.end() ? 0x80020199u : 0x80020190u); return;
+            }
+            const std::uint32_t stack = ctx.gpr[29u];
+            // The first stacked PSP argument (timeout) is at sp+0 and the
+            // optional resultSize pointer is at sp+4.  sp+16 is our wrapper's
+            // saved return address and must never be treated as an argument.
+            const std::uint32_t result_ptr = rt.memory().contains(stack + 4u, 4u)
+                ? rt.memory().load32(stack + 4u) : 0u;
+            const auto available = found->second.capacity - static_cast<std::uint32_t>(found->second.bytes.size());
+            const std::uint32_t amount = std::min(size, available);
+            trace_pipe_io(rt, "send", found->second, uid, size, amount, ctx.gpr[7u], source);
+            if (amount == 0u && ctx.gpr[7u] == 0u) {
+                suspend_pipe_waiter(rt, ctx, found->second.waiting_writers, "message-pipe-send");
+                return;
+            }
+            for (std::uint32_t i = 0; i < amount; ++i) found->second.bytes.push_back(rt.memory().load8(source + i));
+            if (result_ptr != 0u && rt.memory().contains(result_ptr, 4u)) rt.memory().store32(result_ptr, amount);
+            if (amount == 0u) { set_error(ctx, 0x800201A8u); return; }
+            set_success(ctx);
+            wake_pipe_waiters(found->second.waiting_readers);
+        });
+    runtime.register_hle("ThreadManForUser", 0x7C41F2C2u,
+        [this, wake_pipe_waiters, suspend_pipe_waiter, trace_pipe_io](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto found = message_pipes_.find(uid);
+            const std::uint32_t source = ctx.gpr[5u];
+            const std::uint32_t size = ctx.gpr[6u];
+            if (found == message_pipes_.end() || size == 0u || !rt.memory().contains(source, size)) {
+                set_error(ctx, found == message_pipes_.end() ? 0x80020199u : 0x80020190u); return;
+            }
+            const std::uint32_t stack = ctx.gpr[29u];
+            const std::uint32_t result_ptr = rt.memory().contains(stack + 4u, 4u)
+                ? rt.memory().load32(stack + 4u) : 0u;
+            const auto available = found->second.capacity - static_cast<std::uint32_t>(found->second.bytes.size());
+            const std::uint32_t amount = std::min(size, available);
+            trace_pipe_io(rt, "send-cb", found->second, uid, size, amount, ctx.gpr[7u], source);
+            if (amount == 0u && ctx.gpr[7u] == 0u) {
+                suspend_pipe_waiter(rt, ctx, found->second.waiting_writers, "message-pipe-send-cb");
+                return;
+            }
+            for (std::uint32_t i = 0; i < amount; ++i) found->second.bytes.push_back(rt.memory().load8(source + i));
+            if (result_ptr != 0u && rt.memory().contains(result_ptr, 4u)) rt.memory().store32(result_ptr, amount);
+            if (amount == 0u) { set_error(ctx, 0x800201A8u); return; }
+            set_success(ctx);
+            wake_pipe_waiters(found->second.waiting_readers);
+        });
+    runtime.register_hle("ThreadManForUser", 0x884C9F90u,
+        [this, wake_pipe_waiters, trace_pipe_io](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto found = message_pipes_.find(uid);
+            const std::uint32_t source = ctx.gpr[5u];
+            const std::uint32_t size = ctx.gpr[6u];
+            if (found == message_pipes_.end() || size == 0u || !rt.memory().contains(source, size)) {
+                set_error(ctx, found == message_pipes_.end() ? 0x80020199u : 0x80020190u); return;
+            }
+            const std::uint32_t stack = ctx.gpr[29u];
+            const std::uint32_t result_ptr = rt.memory().contains(stack + 4u, 4u)
+                ? rt.memory().load32(stack + 4u) : 0u;
+            const auto available = found->second.capacity - static_cast<std::uint32_t>(found->second.bytes.size());
+            const std::uint32_t amount = std::min(size, available);
+            trace_pipe_io(rt, "try-send", found->second, uid, size, amount, ctx.gpr[7u], source);
+            for (std::uint32_t i = 0; i < amount; ++i) found->second.bytes.push_back(rt.memory().load8(source + i));
+            if (result_ptr != 0u && rt.memory().contains(result_ptr, 4u)) rt.memory().store32(result_ptr, amount);
+            if (amount == 0u) { set_error(ctx, 0x800201A8u); return; }
+            set_success(ctx);
+            wake_pipe_waiters(found->second.waiting_readers);
+        });
+    runtime.register_hle("ThreadManForUser", 0x74829B76u,
+        [this, wake_pipe_waiters, suspend_pipe_waiter, trace_pipe_io](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto found = message_pipes_.find(uid);
+            const std::uint32_t destination = ctx.gpr[5u];
+            const std::uint32_t size = ctx.gpr[6u];
+            if (found == message_pipes_.end() || size == 0u || !rt.memory().contains(destination, size)) {
+                set_error(ctx, found == message_pipes_.end() ? 0x80020199u : 0x80020190u); return;
+            }
+            const std::uint32_t stack = ctx.gpr[29u];
+            const std::uint32_t result_ptr = rt.memory().contains(stack + 4u, 4u)
+                ? rt.memory().load32(stack + 4u) : 0u;
+            const std::uint32_t amount = std::min(size, static_cast<std::uint32_t>(found->second.bytes.size()));
+            trace_pipe_io(rt, "receive", found->second, uid, size, amount, ctx.gpr[7u], destination);
+            if (amount == 0u && ctx.gpr[7u] == 0u) {
+                suspend_pipe_waiter(rt, ctx, found->second.waiting_readers, "message-pipe-receive");
+                return;
+            }
+            for (std::uint32_t i = 0; i < amount; ++i) {
+                rt.memory().store8(destination + i, found->second.bytes.front());
+                found->second.bytes.pop_front();
+            }
+            if (result_ptr != 0u && rt.memory().contains(result_ptr, 4u)) rt.memory().store32(result_ptr, amount);
+            // The KJFS import wrappers seed a zero result slot at the top of
+            // their 32-byte frame and their epilogues return that word as the
+            // received byte count. Deliver `amount` there (plus v0, per the
+            // PSP SDK: sceKernel*ReceiveMsgPipe return the byte count) only
+            // while the slot still holds the zero sentinel, so callers that
+            // stack real arguments at sp+0 keep their layout.
+            if (amount > 0u && rt.memory().contains(stack, 4u) && rt.memory().load32(stack) == 0u)
+                rt.memory().store32(stack, amount);
+            if (amount == 0u) { set_error(ctx, 0x800201A8u); return; }
+            ctx.set_gpr(2u, amount);
+            wake_pipe_waiters(found->second.waiting_writers);
+        });
+    runtime.register_hle("ThreadManForUser", 0xFBFA697Du,
+        [this, wake_pipe_waiters, suspend_pipe_waiter, trace_pipe_io](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto found = message_pipes_.find(uid);
+            const std::uint32_t destination = ctx.gpr[5u];
+            const std::uint32_t size = ctx.gpr[6u];
+            if (found == message_pipes_.end() || size == 0u || !rt.memory().contains(destination, size)) {
+                set_error(ctx, found == message_pipes_.end() ? 0x80020199u : 0x80020190u); return;
+            }
+            const std::uint32_t stack = ctx.gpr[29u];
+            const std::uint32_t result_ptr = rt.memory().contains(stack + 4u, 4u)
+                ? rt.memory().load32(stack + 4u) : 0u;
+            const std::uint32_t amount = std::min(size, static_cast<std::uint32_t>(found->second.bytes.size()));
+            trace_pipe_io(rt, "receive-cb", found->second, uid, size, amount, ctx.gpr[7u], destination);
+            if (amount == 0u && ctx.gpr[7u] == 0u) {
+                suspend_pipe_waiter(rt, ctx, found->second.waiting_readers, "message-pipe-receive-cb");
+                return;
+            }
+            for (std::uint32_t i = 0; i < amount; ++i) {
+                rt.memory().store8(destination + i, found->second.bytes.front());
+                found->second.bytes.pop_front();
+            }
+            if (result_ptr != 0u && rt.memory().contains(result_ptr, 4u)) rt.memory().store32(result_ptr, amount);
+            // The KJFS import wrappers seed a zero result slot at the top of
+            // their 32-byte frame and their epilogues return that word as the
+            // received byte count. Deliver `amount` there (plus v0, per the
+            // PSP SDK: sceKernel*ReceiveMsgPipe return the byte count) only
+            // while the slot still holds the zero sentinel, so callers that
+            // stack real arguments at sp+0 keep their layout.
+            if (amount > 0u && rt.memory().contains(stack, 4u) && rt.memory().load32(stack) == 0u)
+                rt.memory().store32(stack, amount);
+            if (amount == 0u) { set_error(ctx, 0x800201A8u); return; }
+            ctx.set_gpr(2u, amount);
+            wake_pipe_waiters(found->second.waiting_writers);
+        });
+    runtime.register_hle("ThreadManForUser", 0xDF52098Fu,
+        [this, wake_pipe_waiters, trace_pipe_io](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto found = message_pipes_.find(uid);
+            const std::uint32_t destination = ctx.gpr[5u];
+            const std::uint32_t size = ctx.gpr[6u];
+            if (found == message_pipes_.end() || size == 0u || !rt.memory().contains(destination, size)) {
+                set_error(ctx, found == message_pipes_.end() ? 0x80020199u : 0x80020190u); return;
+            }
+            const std::uint32_t stack = ctx.gpr[29u];
+            const std::uint32_t result_ptr = rt.memory().contains(stack + 4u, 4u)
+                ? rt.memory().load32(stack + 4u) : 0u;
+            const std::uint32_t amount = std::min(size, static_cast<std::uint32_t>(found->second.bytes.size()));
+            trace_pipe_io(rt, "try-receive", found->second, uid, size, amount, ctx.gpr[7u], destination);
+            for (std::uint32_t i = 0; i < amount; ++i) {
+                rt.memory().store8(destination + i, found->second.bytes.front());
+                found->second.bytes.pop_front();
+            }
+            if (result_ptr != 0u && rt.memory().contains(result_ptr, 4u)) rt.memory().store32(result_ptr, amount);
+            // The KJFS import wrappers seed a zero result slot at the top of
+            // their 32-byte frame and their epilogues return that word as the
+            // received byte count. Deliver `amount` there (plus v0, per the
+            // PSP SDK: sceKernel*ReceiveMsgPipe return the byte count) only
+            // while the slot still holds the zero sentinel, so callers that
+            // stack real arguments at sp+0 keep their layout.
+            if (amount > 0u && rt.memory().contains(stack, 4u) && rt.memory().load32(stack) == 0u)
+                rt.memory().store32(stack, amount);
+            if (amount == 0u) { set_error(ctx, 0x800201A8u); return; }
+            ctx.set_gpr(2u, amount);
+            wake_pipe_waiters(found->second.waiting_writers);
+        });
+    const auto lock_lw_mutex = [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx,
+                                      bool blocking) {
+        const std::uint32_t work = ctx.gpr[4u];
+        const std::uint32_t count = ctx.gpr[5u];
+        if (work == 0u || count == 0u || !rt.memory().contains(work, 20u)) {
+            set_error(ctx, 0x80020190u); return;
+        }
+        const std::uint32_t level = rt.memory().load32(work);
+        const std::uint32_t owner = rt.memory().load32(work + 4u);
+        const std::uint32_t attributes = rt.memory().load32(work + 8u);
+        if (level == 0u) {
+            rt.memory().store32(work, count);
+            rt.memory().store32(work + 4u, static_cast<std::uint32_t>(current_uid_));
+            set_success(ctx); return;
+        }
+        if (owner == static_cast<std::uint32_t>(current_uid_) && (attributes & 0x0200u) != 0u) {
+            rt.memory().store32(work, level + count);
+            set_success(ctx); return;
+        }
+        // Contended locking requires a scheduler wait queue; expose a PSP busy
+        // error rather than corrupting the work area or claiming ownership.
+        (void)blocking;
+        set_error(ctx, 0x800201A8u);
+    };
+    runtime.register_hle("Kernel_Library", 0xBEA46419u,
+        [lock_lw_mutex](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            lock_lw_mutex(rt, ctx, true);
+        });
+    runtime.register_hle("Kernel_Library", 0xDC692EE3u,
+        [lock_lw_mutex](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            lock_lw_mutex(rt, ctx, false);
+        });
+    runtime.register_hle("Kernel_Library", 0x15B6446Bu,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const std::uint32_t work = ctx.gpr[4u];
+            const std::uint32_t count = ctx.gpr[5u];
+            if (work == 0u || count == 0u || !rt.memory().contains(work, 20u)) {
+                set_error(ctx, 0x80020190u); return;
+            }
+            const std::uint32_t level = rt.memory().load32(work);
+            const std::uint32_t owner = rt.memory().load32(work + 4u);
+            if (owner != static_cast<std::uint32_t>(current_uid_) || level < count) {
+                set_error(ctx, 0x800201A8u); return;
+            }
+            const std::uint32_t updated = level - count;
+            rt.memory().store32(work, updated);
+            if (updated == 0u) rt.memory().store32(work + 4u, 0u);
+            set_success(ctx);
+        });
+}
+
+void ThreadManager::thread_return_trampoline(psprecomp::Runtime &runtime,
+                                             psprecomp::AllegrexContext &ctx) {
+    if (g_thread_manager == nullptr) {
+        runtime.stop("PSP thread returned without an installed thread manager");
+        return;
+    }
+    g_thread_manager->on_thread_return(runtime, ctx);
+}
+
+bool ThreadManager::allocate_stack(std::uint32_t size, std::uint32_t &bottom,
+                                   std::uint32_t &top) {
+    top = next_stack_top_ & ~0xFFu;
+    if (size == 0u || top < size) return false;
+    bottom = top - size;
+    const std::uint32_t heap_end = heap_end_source_ ? heap_end_source_() : 0x08800000u;
+    if (!runtime_->memory().contains(bottom, size) || bottom < heap_end) return false;
+    next_stack_top_ = bottom;
+    return true;
+}
+
+void ThreadManager::create_thread(psprecomp::Runtime &runtime,
+                                  psprecomp::AllegrexContext &ctx) {
+    const std::uint32_t name_ptr = ctx.gpr[4u];
+    const std::uint32_t entry = ctx.gpr[5u];
+    const std::uint32_t priority = ctx.gpr[6u];
+    const std::uint32_t requested_stack = ctx.gpr[7u];
+    if (requested_stack < 0x200u || requested_stack > 0x01000000u ||
+        !runtime.has_function(entry)) {
+        set_error(ctx, 0x80020194u);
+        return;
+    }
+    const std::uint32_t stack_size = (requested_stack + 0xFFu) & ~0xFFu;
+    std::uint32_t bottom = 0u;
+    std::uint32_t top = 0u;
+    if (!allocate_stack(stack_size, bottom, top)) {
+        set_error(ctx, 0x80020190u);
+        return;
+    }
+
+    Thread thread{};
+    thread.name = name_ptr != 0u ? runtime.memory().read_c_string(name_ptr, 128u) : "unnamed";
+    thread.entry = entry;
+    thread.priority = priority;
+    thread.stack_bottom = bottom;
+    thread.stack_top = top;
+    const std::int32_t uid = next_uid_++;
+    runtime.memory().zero(bottom, stack_size);
+    runtime.memory().store32(bottom, static_cast<std::uint32_t>(uid));
+    threads_.emplace(uid, std::move(thread));
+    ctx.set_gpr(2u, static_cast<std::uint32_t>(uid));
+    if (thread_diag_enabled()) {
+        const Thread &created = threads_.at(uid);
+        std::cerr << "[pw-thread] create uid=" << uid << " name=" << created.name
+                  << " entry=" << psprecomp::hex32(entry) << " priority=" << priority
+                  << " stack=" << psprecomp::hex32(bottom) << "-" << psprecomp::hex32(top) << "\n";
+    }
+}
+
+void ThreadManager::enqueue(std::int32_t uid,
+                            const psprecomp::AllegrexContext &context) {
+    const auto found = threads_.find(uid);
+    if (found == threads_.end()) return;
+    found->second.state = State::Ready;
+    found->second.context = context;
+    const auto existing = std::find_if(ready_.begin(), ready_.end(),
+        [uid](const ReadyItem &item) { return item.uid == uid; });
+    if (existing != ready_.end()) existing->sequence = next_ready_sequence_++;
+    else ready_.push_back(ReadyItem{uid, next_ready_sequence_++});
+}
+
+bool ThreadManager::activate_next(psprecomp::Runtime &runtime,
+                                  psprecomp::AllegrexContext &ctx,
+                                  const char *reason) {
+    ready_.erase(std::remove_if(ready_.begin(), ready_.end(), [this](const ReadyItem &item) {
+        const auto found = threads_.find(item.uid);
+        return found == threads_.end() || found->second.state != State::Ready;
+    }), ready_.end());
+    if (ready_.empty()) return false;
+
+    const auto selected = std::min_element(ready_.begin(), ready_.end(), [this](const auto &a, const auto &b) {
+        const std::uint32_t pa = threads_.at(a.uid).priority;
+        const std::uint32_t pb = threads_.at(b.uid).priority;
+        return pa != pb ? pa < pb : a.sequence < b.sequence;
+    });
+    const ReadyItem item = *selected;
+    ready_.erase(selected);
+    current_uid_ = item.uid;
+    Thread &thread = threads_.at(item.uid);
+    thread.state = State::Running;
+    ctx = thread.context;
+    psprecomp::set_runtime_thread_identity(item.uid, thread.name);
+    if (thread_diag_enabled())
+        std::cerr << "[pw-thread] switch reason=" << reason << " uid=" << item.uid
+                  << " name=" << thread.name << " pc=" << psprecomp::hex32(ctx.pc) << "\n";
+    (void)runtime;
+    return true;
+}
+
+void ThreadManager::start_thread(psprecomp::Runtime &runtime,
+                                 psprecomp::AllegrexContext &ctx) {
+    const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+    const auto found = threads_.find(uid);
+    if (uid <= 0 || found == threads_.end()) {
+        set_error(ctx, 0x80020198u);
+        return;
+    }
+    Thread &thread = found->second;
+    if (thread.state != State::Created) {
+        set_error(ctx, 0x800201A4u);
+        return;
+    }
+
+    const std::uint32_t argument_size = ctx.gpr[5u];
+    const std::uint32_t argument_ptr = ctx.gpr[6u];
+    std::uint32_t sp = thread.stack_top - 0x100u;
+    psprecomp::AllegrexContext next{};
+    if (argument_ptr != 0u && argument_size != 0u) {
+        if (argument_size > 0x10000u || !runtime.memory().contains(argument_ptr, argument_size)) {
+            set_error(ctx, 0x800200D3u);
+            return;
+        }
+        const std::uint32_t aligned_size = (argument_size + 0xFu) & ~0xFu;
+        if (sp < thread.stack_bottom + aligned_size + 64u) {
+            set_error(ctx, 0x800200D3u);
+            return;
+        }
+        sp -= aligned_size;
+        std::vector<std::uint8_t> args(argument_size);
+        runtime.memory().copy_out(argument_ptr, args);
+        runtime.memory().copy_in(sp, args);
+        next.set_gpr(4u, argument_size);
+        next.set_gpr(5u, sp);
+    }
+    sp -= 64u;
+    next.set_gpr(26u, thread.stack_top - 0x100u);
+    next.set_gpr(28u, ctx.gpr[28u]);
+    next.set_gpr(29u, sp);
+    next.set_gpr(30u, sp);
+    next.set_gpr(31u, 0u);
+    next.pc = thread.entry;
+    enqueue(uid, next);
+
+    const std::int32_t caller_uid = current_uid_;
+    const auto caller = threads_.find(caller_uid);
+    const std::uint32_t caller_priority = caller != threads_.end() ? caller->second.priority : 0xFFFFFFFFu;
+    if (thread.priority < caller_priority) {
+        psprecomp::AllegrexContext caller_context = ctx;
+        caller_context.set_gpr(2u, 0u);
+        caller_context.pc = ctx.gpr[31u];
+        enqueue(caller_uid, caller_context);
+        (void)activate_next(runtime, ctx, "start-thread");
+    } else {
+        set_success(ctx);
+    }
+}
+
+void ThreadManager::wake_thread_end_waiters(std::int32_t completed_uid) {
+    const auto found = end_waiters_.find(completed_uid);
+    if (found == end_waiters_.end()) return;
+    for (const std::int32_t waiter_uid : found->second) {
+        const auto waiter = threads_.find(waiter_uid);
+        if (waiter != threads_.end() && waiter->second.state == State::Sleeping)
+            enqueue(waiter_uid, waiter->second.context);
+    }
+    end_waiters_.erase(found);
+}
+
+void ThreadManager::on_thread_return(psprecomp::Runtime &runtime,
+                                     psprecomp::AllegrexContext &ctx) {
+    const std::int32_t finished_uid = current_uid_;
+    if (const auto found = threads_.find(finished_uid); found != threads_.end())
+        found->second.state = State::Completed;
+    wake_thread_end_waiters(finished_uid);
+    if (!activate_next(runtime, ctx, "thread-return")) {
+        set_success(ctx);
+        runtime.stop("All PSP threads completed");
+    }
+}
+
+void ThreadManager::exit_delete_thread(psprecomp::Runtime &runtime,
+                                       psprecomp::AllegrexContext &ctx) {
+    if (const auto found = threads_.find(current_uid_); found != threads_.end())
+        found->second.context.set_gpr(2u, ctx.gpr[4u]);
+    on_thread_return(runtime, ctx);
+}
+
+void ThreadManager::wait_thread_end(psprecomp::Runtime &runtime,
+                                    psprecomp::AllegrexContext &ctx) {
+    const auto target_uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+    const auto target = threads_.find(target_uid);
+    if (target_uid <= 0 || target == threads_.end()) {
+        set_error(ctx, 0x80020198u);
+        return;
+    }
+    if (target->second.state == State::Completed) {
+        set_success(ctx);
+        return;
+    }
+    const std::int32_t waiter_uid = current_uid_;
+    psprecomp::AllegrexContext waiter = ctx;
+    waiter.set_gpr(2u, 0u);
+    waiter.pc = ctx.gpr[31u];
+    end_waiters_[target_uid].push_back(waiter_uid);
+    if (auto current = threads_.find(waiter_uid); current != threads_.end()) {
+        current->second.state = State::Sleeping;
+        current->second.context = waiter;
+    }
+    if (!activate_next(runtime, ctx, "wait-thread-end"))
+        runtime.stop("Peace Walker thread wait deadlock on uid " + std::to_string(target_uid));
+}
+
+} // namespace bbs

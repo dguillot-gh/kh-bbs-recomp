@@ -1,0 +1,21 @@
+# Build output + artifacts (local only)
+/out/
+/build/
+cmake-build-*/
+CMakeUserPresets.json
+*.exe
+*.dll
+*.lib
+*.obj
+*.exp
+*.iobj
+*.ipdb
+*.res
+*.pdb
+*.ilk
+.vs/
+.vscode/
+.idea/
+*.user
+__pycache__/
+*.pyc
