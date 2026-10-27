@@ -7,9 +7,25 @@ Build and run from the workspace root: `.\psp.ps1 -Game bbs -Stage regen|build|r
 Inputs (local only): `extracted\KingdomHeartsBirthBySleep\` (`decrypted\EBOOT.BIN.dec`,
 `disc-files\`, corpus `generated-psprecomp-fixed32k\`, or `generated-v2\` after a regen).
 
-## Current state (2026-10-27, work-PC review): spins in a wait loop for the "DiscInfoBind" thread
+## Current state (2026-10-27, home PC): DiscInfoBind runs its UMD probe but never sets the done-flag
 
-- After 6 HLE cycles (cycle log below) the run exits 0 at the dispatch cap:
+- **Step 2 done (2026-10-27, home PC).** Two fixes landed this session: (1) `delay_yield` in
+  `thread_manager.cpp` — the delaying thread now loses the scheduling round to any ready peer, so
+  DiscInfoBind actually gets scheduled and runs (it previously never ran); (2) `DiscIo::open` in
+  `disc_io.cpp` — a bare-drive / pseudo-path probe (e.g. "umd1:") maps to a host directory that
+  `std::fstream::open` rejects on Windows, so return a valid synthetic fd instead of an error
+  (VCS does the same for empty-device probes). This resolved the `0x08810E04` umd1: open retry
+  loop (1 open now, was 32).
+- **New stop (exit 0, BUDGET USED):** `Dispatch limit reached at 0x0880F6F8` (cap 300000).
+  DiscInfoBind (uid=2) now runs its full visible job — `sceIoGetstat`, `sceUmdGetDriveStat(1)`,
+  lock, `sceIoOpen("umd1:")` (succeeds), unlock — then **returns** without ever writing the
+  done-flag at `0x09A7A668`. user_main (uid=1) polls that flag in a 33 ms `DelayThreadCB` loop at
+  `0x0880F6F8` and spins to the cap. Trace: `logs\bbs\20261027-182557-run.log` (lines 116-132).
+- **Next lead (fresh session):** why does DiscInfoBind exit after the umd1: probe without setting
+  `0x09A7A668`? Read the DiscInfoBind entry `0x0880F750` and the umd-check function
+  `0x08810D94`-`0x08810E04` in `generated_unit_0001.cpp`; re-run the Step 1 trace with
+  `PSPRECOMP_WATCH_WRITE=0x09A7A668` to confirm nothing writes the flag.
+- (Earlier, work-PC review) the run exited 0 at the dispatch cap:
   `Dispatch limit reached at 0x0880F6F8` (cap 300000). No missing HLE, no unlifted code.
 - **It is not the main loop.** `generated_unit_0001.cpp` ~8020-8090, function around
   `L_0880F654`:

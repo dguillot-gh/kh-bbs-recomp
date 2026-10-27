@@ -482,6 +482,13 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
         [lock_lw_mutex](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
             lock_lw_mutex(rt, ctx, false);
         });
+    // LockLwMutexCB: same (work, count) shape; the callback arg (a2) is
+    // ignored — if the mutex is free the lock succeeds and the callback is
+    // never due; if contended, lock_lw_mutex reports the PSP busy error.
+    runtime.register_hle("Kernel_Library", 0x1FC64E09u,
+        [lock_lw_mutex](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            lock_lw_mutex(rt, ctx, true);
+        });
     runtime.register_hle("Kernel_Library", 0x15B6446Bu,
         [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
             const std::uint32_t work = ctx.gpr[4u];
@@ -626,8 +633,21 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
         yielded.set_gpr(2u, 0u);
         yielded.pc = ctx.gpr[31u]; // Continue past the import once the peer yields back.
         enqueue(current_uid_, yielded);
+        // A delaying thread is not ready to run right away, so it loses this
+        // scheduling round to every ready peer, even lower-priority ones: on
+        // PSP a started peer runs while the caller sits in its delay.
+        // (BBS: user_main 19 vs DiscInfoBind 20 — without this, user_main
+        // re-wins every round and DiscInfoBind never runs.)
+        auto self = threads_.find(current_uid_);
+        if (self == threads_.end()) {
+            rt.stop("BBS delay deadlock: delaying thread unknown");
+            return;
+        }
+        const std::uint32_t saved_priority = self->second.priority;
+        self->second.priority = 0xFFFFFFFFu;
         if (!activate_next(rt, ctx, "delay-yield"))
             rt.stop("BBS delay deadlock: no thread to run after yield");
+        self->second.priority = saved_priority;
     };
     runtime.register_hle("ThreadManForUser", 0xCEADEB47u,   // sceKernelDelayThread
         [delay_yield](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {

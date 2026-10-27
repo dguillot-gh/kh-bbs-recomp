@@ -144,6 +144,20 @@ void DiscIo::open(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) 
         if (!create && !std::filesystem::exists(native, error)) {
             ctx.set_gpr(2u, kIoErrorNotFound); return;
         }
+        // A bare drive / pseudo-path probe (e.g. "umd1:") maps to a directory on the host.
+        // The PSP treats this as a valid (empty) device handle and games check only the
+        // returned fd >= 0 to confirm the medium is present before loading its archives.
+        // Opening the directory with std::fstream fails on Windows, so hand back a valid
+        // synthetic fd instead — VCS's HLE does the same for disc0:/sce_lbn0x0 probes.
+        if (!create && std::filesystem::is_directory(native, error)) {
+            OpenFile probe{};
+            probe.readable = read_access;
+            probe.writable = write_access;
+            const std::int32_t fd = next_fd_++;
+            files_.emplace(fd, std::move(probe));
+            ctx.set_gpr(2u, static_cast<std::uint32_t>(fd));
+            return;
+        }
         std::ios::openmode mode = std::ios::binary;
         if (read_access) mode |= std::ios::in;
         if (write_access) mode |= std::ios::out;
