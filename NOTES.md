@@ -118,6 +118,10 @@ compile error for calls into units with nothing to dispatch.
     target via a register that codegen treats as out-of-unit). Grep
     `generated-v2\generated_unit_0000.cpp` for `0x0880A5DC` to see how it is
     referenced.
+- 10/27 (home PC, seed-fix session): **step 1: done.** `psp_recomp` rebuilt from
+  `psp-native-runtime` HEAD `94e3158` (includes the `5adcf15` fixed-ELF data-section
+  seed fix and `68d027a` jal fix). `program_analysis.cpp` compiled clean;
+  `psp_recomp.exe` produced in `out\framework\Release`.
 
 ## What worked
 - 10/19: corpus generated, 113 units / 481,005 instructions / 281 import wrappers
