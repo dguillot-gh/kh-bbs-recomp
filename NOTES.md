@@ -7,9 +7,14 @@ Build and run from the workspace root: `.\psp.ps1 -Game bbs -Stage regen|build|r
 Inputs (local only): `extracted\KingdomHeartsBirthBySleep\` (`decrypted\EBOOT.BIN.dec`,
 `disc-files\`, corpus `generated-psprecomp-fixed32k\`, or `generated-v2\` after a regen).
 
-## Current state (2026-10-27, work-PC review): builds, links, first run stops on unlifted code
+## Current state (2026-10-27, home PC): reaches the main loop; run stops at dispatch cap 300000
 
-- Run stops 0.1 s in: `invalid internal function entry` at `0x0880A5DC`. **Not a deadlock and not
+- BBS is running: after 6 HLE cycles (see the cycle log below), the game reaches its main loop
+  and the run exits 0: `STOP: Runtime stopped: Dispatch limit reached at 0x0880F6F8` (cap
+  300000) — no missing HLEs, no deadlock, no unlifted code. 6-cycle cap reached; loop parked.
+- The `0x0880A5DC` unlifted-code stop below is fixed (the `5adcf15` seed fix; `.\psp.ps1 lifted
+  0x0880A5DC -Game bbs` now says `lifted: yes`). The rest of this block is the earlier diagnosis.
+- (Earlier, work-PC review) run stops 0.1 s in: `invalid internal function entry` at `0x0880A5DC`. **Not a deadlock and not
   a reason to park**: it's unlifted code (`.\psp.ps1 lifted 0x0880A5DC -Game bbs`: no label, no mention).
 - `0x0880A5DC` is a real function (`addiu sp,sp,-16` right after a `jr ra`). Its only reference is
   the first word of **`.cplinit`** (`0x08B30970`, 0x320 bytes = 100 `{func, 0}` pairs): SNC's C++
