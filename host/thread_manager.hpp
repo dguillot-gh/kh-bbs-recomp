@@ -55,6 +55,8 @@ private:
     std::int32_t next_lw_mutex_uid_{0x500};
     std::int32_t next_semaphore_uid_{0x600};
     std::int32_t next_message_pipe_uid_{0x700};
+    std::int32_t next_mutex_uid_{0x800};
+    std::int32_t next_event_flag_uid_{0x900};
     std::uint32_t next_stack_top_{0x09FF0000u};
     std::uint64_t next_ready_sequence_{1u};
     std::function<std::uint32_t()> heap_end_source_;
@@ -71,6 +73,16 @@ private:
         std::vector<std::int32_t> waiting_writers;
     };
     std::unordered_map<std::int32_t, MessagePipe> message_pipes_;
+    // Event flags: waiters are sleeping thread uids; on wake they re-enter
+    // the sceKernelWaitEventFlag import (context kept at the import pc, like
+    // the message-pipe waiters) and re-check the pattern there.
+    struct EventFlag {
+        std::string name;
+        std::uint32_t attributes{};
+        std::uint32_t pattern{};
+        std::vector<std::int32_t> waiters;
+    };
+    std::unordered_map<std::int32_t, EventFlag> event_flags_;
 };
 
 } // namespace bbs

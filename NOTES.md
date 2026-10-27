@@ -129,6 +129,36 @@ compile error for calls into units with nothing to dispatch.
   `generated_unit_0000.cpp:12801`, registered at :17239 (`register_function`).
 - 10/27 (home PC, seed-fix session): **step 3: done.** Build OK (exit 0),
   BBSBringup.exe linked; all 113 units recompiled from the new corpus, no errors.
+- 10/27 (home PC, HLE session): **step 4: in progress** — repeat exit 3, one HLE per cycle (≤6).
+  - **Cycle 1:** exit 3, missing `ThreadManForUser::0xB7D098C6` = `sceKernelCreateMutex`.
+    Fixed: 5 mutex HLEs (Create/Lock/TryLock/Unlock/Delete) in `host\thread_manager.cpp`
+    (mutex = max-1 semaphore, lenient create) + NID names in both tables. Re-run cleared it.
+  - **Cycle 2:** exit 3, missing `sceImpose::0x24FD7BCF` = `sceImposeGetLanguageMode`.
+    Fixed: stub in `host\main.cpp` echoing the earlier `SetLanguageMode` value (1) + NID in
+    `nids.csv`/registry. Re-run cleared it.
+  - **Cycle 3:** exit 3, missing `ThreadManForUser::0x55C20A00` = `sceKernelCreateEventFlag`.
+    Fix (this cycle): full event-flag set (Create/Delete/Set/Clear/Poll/Wait/WaitCB) in
+    `thread_manager.cpp` adapted from the VCS profile to BBS's re-enter-on-wake suspend idiom,
+    real-PSP Clear semantics (`pattern &= ~mask`), uids from 0x900. NIDs added to `nids.csv`
+    (registry already had all 7). Re-run cleared it (next stop was a different import).
+  - **Cycle 4:** exit 3, missing `scePower::0x04B7766E` = `scePowerRegisterCallback`.
+    Fixed: success stub in `host\main.cpp` (accepted, never fired — VCS does the same).
+    Re-run cleared it.
+  - **Cycle 5:** exit 3, missing `scePower::0x87440F5E` = `scePowerIsPowerOnline`.
+    Fixed: returns 1 (AC online) in `host\main.cpp` so the game never takes battery paths.
+    Re-run cleared it — the game reached its main loop (33 ms frame delay).
+  - **Cycle 6 (last):** exit 3, missing `ThreadManForUser::0x68DA9E36` =
+    `sceKernelDelayThreadCB args=[0x8236 µs (≈33 ms)]`. Fix: `DelayThread` (0xCEADEB47) +
+    `DelayThreadCB` in `thread_manager.cpp` — cooperative yield: if a peer is ready,
+    re-enqueue self past the import (return 0) and let it run; otherwise return success
+    and continue at host speed (no host-side timer in this scheduler). NIDs were already
+    in both tables.
+  - **Cycle 6 (last) re-run: exit 0.** `STOP: Runtime stopped: Dispatch limit reached at
+    0x0880F6F8` (cap 300000) — the game ran its main loop at host speed until the dispatch
+    budget was exhausted; no more missing HLEs, no deadlock, no unlifted code. Log is 14 lines
+    (banner only, no dispatch trace): Entry `0x08A8BD58`, Functions `156782`, Dispatch cap
+    `300000`, SDK `100794384` (0x06020010), Compiler `197382`; full log
+    `logs\bbs\20261027-154740-run.log`. **6-cycle cap reached — BBS loop stopped here.**
 
 ## What worked
 - 10/19: corpus generated, 113 units / 481,005 instructions / 281 import wrappers

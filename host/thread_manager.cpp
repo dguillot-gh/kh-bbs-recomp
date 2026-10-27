@@ -18,6 +18,16 @@ bool thread_diag_enabled() {
     return std::getenv("PSPRECOMP_THREAD_DIAG") != nullptr ||
         std::getenv("PSPRECOMP_TRACE") != nullptr;
 }
+// PSP event-flag wait matching: mode bit 0 = OR (any bit set), else AND (all set).
+bool event_flag_matches(std::uint32_t pattern, std::uint32_t requested, std::uint32_t mode) {
+    if ((mode & 1u) != 0u) return (pattern & requested) != 0u;
+    return (pattern & requested) == requested;
+}
+// Wait-consume modes: 0x20 clears the waited bits, 0x10 clears everything.
+void consume_event_flag(std::uint32_t &pattern, std::uint32_t requested, std::uint32_t mode) {
+    if ((mode & 0x20u) != 0u) pattern &= ~requested;
+    if ((mode & 0x10u) != 0u) pattern = 0u;
+}
 }
 
 void ThreadManager::initialize(psprecomp::Runtime &runtime,
@@ -28,6 +38,7 @@ void ThreadManager::initialize(psprecomp::Runtime &runtime,
     next_lw_mutex_uid_ = 0x500;
     next_semaphore_uid_ = 0x600;
     next_message_pipe_uid_ = 0x700;
+    next_event_flag_uid_ = 0x900;
     next_stack_top_ = 0x09FF0000u;
     next_ready_sequence_ = 1u;
     threads_.clear();
@@ -35,6 +46,7 @@ void ThreadManager::initialize(psprecomp::Runtime &runtime,
     end_waiters_.clear();
     semaphores_.clear();
     message_pipes_.clear();
+    event_flags_.clear();
 
     Thread main{};
     main.name = "module_start";
@@ -132,6 +144,55 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
             set_success(ctx);
         });
     runtime.register_hle("ThreadManForUser", 0x28B6489Cu,
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            if (semaphores_.erase(uid) == 0u) { set_error(ctx, 0x80020199u); return; }
+            set_success(ctx);
+        });
+    // PSP mutex = semaphore with maximum 1. BBS passes initialCount=768 in $a1 and
+    // stores the handle unconditionally, so create is lenient: any nonzero initial frees it.
+    runtime.register_hle("ThreadManForUser", 0xB7D098C6u,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const auto initial = static_cast<std::int32_t>(ctx.gpr[5u]);
+            const std::int32_t uid = next_mutex_uid_++;
+            semaphores_.emplace(uid, Semaphore{initial != 0 ? 1 : 0, 1});
+            if (thread_diag_enabled()) {
+                const std::string name = ctx.gpr[4u] != 0u
+                    ? rt.memory().read_c_string(ctx.gpr[4u], 64u) : "mutex";
+                std::cerr << "[bbs-thread] create-mutex uid=" << uid << " name=\"" << name
+                          << "\" initial=" << initial << "\n";
+            }
+            ctx.set_gpr(2u, static_cast<std::uint32_t>(uid));
+        });
+    runtime.register_hle("ThreadManForUser", 0xB011B11Fu,
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto it = semaphores_.find(uid);
+            if (it == semaphores_.end()) { set_error(ctx, 0x80020199u); return; }
+            if (it->second.count < 1) { set_error(ctx, 0x800201A8u); return; }
+            it->second.count = 0;
+            set_success(ctx);
+        });
+    // TryLock: same non-blocking behavior as Lock; timeout arg ignored.
+    runtime.register_hle("ThreadManForUser", 0x0DDCD2C9u,
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto it = semaphores_.find(uid);
+            if (it == semaphores_.end()) { set_error(ctx, 0x80020199u); return; }
+            if (it->second.count < 1) { set_error(ctx, 0x800201A8u); return; }
+            it->second.count = 0;
+            set_success(ctx);
+        });
+    runtime.register_hle("ThreadManForUser", 0x6B30100Fu,
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto it = semaphores_.find(uid);
+            if (it == semaphores_.end()) { set_error(ctx, 0x80020199u); return; }
+            if (it->second.count != 0) { set_error(ctx, 0x800201B0u); return; }
+            it->second.count = 1;
+            set_success(ctx);
+        });
+    runtime.register_hle("ThreadManForUser", 0xF8170FBEu,
         [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
             const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
             if (semaphores_.erase(uid) == 0u) { set_error(ctx, 0x80020199u); return; }
@@ -437,6 +498,144 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
             rt.memory().store32(work, updated);
             if (updated == 0u) rt.memory().store32(work + 4u, 0u);
             set_success(ctx);
+        });
+    // Event flags (VCS profile reference, adapted to BBS's re-entry suspend):
+    // a sleeping waiter keeps its context at the import pc and re-enters the
+    // wait handler on wake, re-checking the pattern there (like pipe waiters).
+    const auto wake_event_flag_waiters = [this](EventFlag &flag) {
+        if (flag.waiters.empty()) return;
+        for (const std::int32_t waiter : flag.waiters) {
+            const auto thread = threads_.find(waiter);
+            if (thread != threads_.end() && thread->second.state == State::Sleeping)
+                enqueue(waiter, thread->second.context);
+        }
+        flag.waiters.clear();
+    };
+    runtime.register_hle("ThreadManForUser", 0x55C20A00u,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const std::string name = ctx.gpr[4u] != 0u
+                ? rt.memory().read_c_string(ctx.gpr[4u], 64u) : "event-flag";
+            const std::uint32_t attributes = ctx.gpr[5u];
+            const std::uint32_t initial = ctx.gpr[6u];
+            const std::int32_t uid = next_event_flag_uid_++;
+            event_flags_.emplace(uid, EventFlag{name, attributes, initial, {}});
+            if (thread_diag_enabled())
+                std::cerr << "[bbs-thread] create-event-flag uid=" << uid << " name=\"" << name
+                          << "\" attr=0x" << std::hex << attributes << " init=0x" << initial
+                          << std::dec << "\n";
+            ctx.set_gpr(2u, static_cast<std::uint32_t>(uid));
+        });
+    runtime.register_hle("ThreadManForUser", 0xEF9E4C70u,
+        [this, wake_event_flag_waiters](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto found = event_flags_.find(uid);
+            if (found == event_flags_.end()) { set_error(ctx, 0x80020199u); return; }
+            wake_event_flag_waiters(found->second);
+            // Woken waiters re-enter their wait and receive an invalid-uid error.
+            event_flags_.erase(found);
+            set_success(ctx);
+        });
+    runtime.register_hle("ThreadManForUser", 0x1FB15A32u,
+        [this, wake_event_flag_waiters](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto found = event_flags_.find(uid);
+            if (found == event_flags_.end()) { set_error(ctx, 0x80020199u); return; }
+            EventFlag &flag = found->second;
+            flag.pattern |= ctx.gpr[5u];
+            wake_event_flag_waiters(flag);
+            set_success(ctx);
+        });
+    // PSP clear semantics: clear the bits present in the mask (pattern &= ~mask).
+    runtime.register_hle("ThreadManForUser", 0x812346E4u,
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto found = event_flags_.find(uid);
+            if (found == event_flags_.end()) { set_error(ctx, 0x80020199u); return; }
+            found->second.pattern &= ~ctx.gpr[5u];
+            set_success(ctx);
+        });
+    runtime.register_hle("ThreadManForUser", 0x30FD48F0u,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto found = event_flags_.find(uid);
+            if (found == event_flags_.end()) { set_error(ctx, 0x80020199u); return; }
+            const std::uint32_t requested = ctx.gpr[5u];
+            const std::uint32_t mode = ctx.gpr[6u];
+            const std::uint32_t output = ctx.gpr[7u];
+            if (requested == 0u || (mode & ~0x31u) != 0u) { set_error(ctx, 0x800201B0u); return; }
+            EventFlag &flag = found->second;
+            if (!event_flag_matches(flag.pattern, requested, mode)) {
+                if (output != 0u && rt.memory().contains(output, 4u))
+                    rt.memory().store32(output, flag.pattern);
+                set_error(ctx, 0x800201A8u);
+                return;
+            }
+            if (output != 0u && rt.memory().contains(output, 4u))
+                rt.memory().store32(output, flag.pattern);
+            consume_event_flag(flag.pattern, requested, mode);
+            set_success(ctx);
+        });
+    const auto event_flag_wait = [this](psprecomp::Runtime &rt,
+                                        psprecomp::AllegrexContext &ctx,
+                                        const char *reason) {
+        const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+        const auto found = event_flags_.find(uid);
+        if (found == event_flags_.end()) { set_error(ctx, 0x80020199u); return; }
+        const std::uint32_t requested = ctx.gpr[5u];
+        const std::uint32_t mode = ctx.gpr[6u];
+        const std::uint32_t output = ctx.gpr[7u];
+        if (requested == 0u || (mode & ~0x31u) != 0u) { set_error(ctx, 0x800201B0u); return; }
+        EventFlag &flag = found->second;
+        if (event_flag_matches(flag.pattern, requested, mode)) {
+            if (output != 0u && rt.memory().contains(output, 4u))
+                rt.memory().store32(output, flag.pattern);
+            consume_event_flag(flag.pattern, requested, mode);
+            set_success(ctx);
+            return;
+        }
+        const auto current = threads_.find(current_uid_);
+        if (current == threads_.end()) { rt.stop("Event-flag wait without a PSP thread"); return; }
+        current->second.state = State::Sleeping;
+        current->second.context = ctx; // Re-enter the import once the flag is set.
+        if (std::find(flag.waiters.begin(), flag.waiters.end(), current_uid_) == flag.waiters.end())
+            flag.waiters.push_back(current_uid_);
+        if (!activate_next(rt, ctx, reason))
+            rt.stop("BBS event-flag deadlock waiting on uid " + std::to_string(uid));
+    };
+    runtime.register_hle("ThreadManForUser", 0x402FCF22u,
+        [event_flag_wait](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            event_flag_wait(rt, ctx, "event-flag-wait");
+        });
+    // WaitCB: callback arg ignored; the game's event-flag waits are blocking.
+    runtime.register_hle("ThreadManForUser", 0x328C546Au,
+        [event_flag_wait](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            event_flag_wait(rt, ctx, "event-flag-wait-cb");
+        });
+    // Delay bring-up: PSP's DelayThread suspends the caller, but this
+    // cooperative scheduler has no host-side timer. If a peer is ready, yield
+    // to it and resume after the import as if the delay completed; with no
+    // peer ready the main loop continues at host speed (no frame pacing).
+    // The delay duration and the CB callback argument are ignored.
+    const auto delay_yield = [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+        const bool peer_ready = std::any_of(ready_.begin(), ready_.end(), [this](const ReadyItem &item) {
+            const auto found = threads_.find(item.uid);
+            return found != threads_.end() && found->second.state == State::Ready;
+        });
+        if (!peer_ready) { set_success(ctx); return; }
+        psprecomp::AllegrexContext yielded = ctx;
+        yielded.set_gpr(2u, 0u);
+        yielded.pc = ctx.gpr[31u]; // Continue past the import once the peer yields back.
+        enqueue(current_uid_, yielded);
+        if (!activate_next(rt, ctx, "delay-yield"))
+            rt.stop("BBS delay deadlock: no thread to run after yield");
+    };
+    runtime.register_hle("ThreadManForUser", 0xCEADEB47u,   // sceKernelDelayThread
+        [delay_yield](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            delay_yield(rt, ctx);
+        });
+    runtime.register_hle("ThreadManForUser", 0x68DA9E36u,   // sceKernelDelayThreadCB
+        [delay_yield](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            delay_yield(rt, ctx);
         });
 }
 

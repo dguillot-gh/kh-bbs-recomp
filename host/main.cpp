@@ -222,6 +222,26 @@ int main(int argc, char **argv) {
                 impose_button = ctx.gpr[5u];
                 ctx.set_gpr(2u, 0u);
             });
+        runtime.register_hle("sceImpose", 0x24FD7BCFu,
+            [&impose_language](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                // Echo the value SetLanguageMode recorded; the caller passes
+                // two adjacent output words (observed at 0x09FEFA80/0x09FEFA84).
+                const std::uint32_t first = ctx.gpr[4u];
+                if (first != 0u && rt.memory().contains(first, 4u)) {
+                    rt.memory().store32(first, impose_language);
+                }
+                const std::uint32_t second = ctx.gpr[5u];
+                if (second != 0u && rt.memory().contains(second, 4u)) {
+                    rt.memory().store32(second, 0u);
+                }
+                ctx.set_gpr(2u, 0u);
+            });
+        // Power callback registration: accepted but never fired (VCS does the same).
+        runtime.register_hle("scePower", 0x04B7766Eu,
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
+        // AC power: report online (1) so the game never takes battery-saving paths.
+        runtime.register_hle("scePower", 0x87440F5Eu,
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 1u); });
         runtime.register_hle("sceRtc", 0xE7C27D1Bu,
             [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
                 const std::uint32_t output = ctx.gpr[4u];
