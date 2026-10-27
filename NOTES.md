@@ -122,6 +122,11 @@ compile error for calls into units with nothing to dispatch.
   `psp-native-runtime` HEAD `94e3158` (includes the `5adcf15` fixed-ELF data-section
   seed fix and `68d027a` jal fix). `program_analysis.cpp` compiled clean;
   `psp_recomp.exe` produced in `out\framework\Release`.
+- 10/27 (home PC, seed-fix session): **step 2: done.** Regen OK: 113 units,
+  656,217 instructions (was 481,005). `function seeds: 20702` (was 12,533),
+  `registered blocks: 156781` (was 109,599) — seeds ~65% higher.
+  `.\psp.ps1 lifted 0x0880A5DC` → **lifted: yes** at
+  `generated_unit_0000.cpp:12801`, registered at :17239 (`register_function`).
 
 ## What worked
 - 10/19: corpus generated, 113 units / 481,005 instructions / 281 import wrappers
