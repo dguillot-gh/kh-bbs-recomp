@@ -127,6 +127,8 @@ compile error for calls into units with nothing to dispatch.
   `registered blocks: 156781` (was 109,599) — seeds ~65% higher.
   `.\psp.ps1 lifted 0x0880A5DC` → **lifted: yes** at
   `generated_unit_0000.cpp:12801`, registered at :17239 (`register_function`).
+- 10/27 (home PC, seed-fix session): **step 3: done.** Build OK (exit 0),
+  BBSBringup.exe linked; all 113 units recompiled from the new corpus, no errors.
 
 ## What worked
 - 10/19: corpus generated, 113 units / 481,005 instructions / 281 import wrappers
