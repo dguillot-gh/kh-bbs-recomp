@@ -101,6 +101,12 @@ compile error for calls into units with nothing to dispatch.
     13 lines before (all of them): harness banner only (ELF/Entry/GP/
     Relocations/Functions/Dispatch cap/versions) — no dispatch trace lines,
     log is 14 lines total. Per session rule, exit 0 → recorded and BBS parked.
+  - **Coverage (same session):** `.\psp.ps1 coverage -Game bbs`:
+    281 imports total — **handled 51, MISSING 230** (32 of them network/online).
+    Boot-relevant gaps: InterruptManager (3 sub-intr), IoFileMgrForUser (10),
+    Kernel_Library (4, incl. `sceKernelMemcpy/sceKernelMemset`), LoadExecForUser
+    (`sceKernelExitGame`), ModuleMgrForUser (2), plus the audio/display/GE/MPEG
+    stacks. Full table: `logs\bbs\hle-coverage.md`.
   - **Next lead (fresh session):** why is 0x0880A5DC not an entry of unit 0000
     (check codegen entry collection for that address; likely a `jalr`/`jr`
     target via a register that codegen treats as out-of-unit). Grep
