@@ -7,18 +7,24 @@ Build and run from the workspace root: `.\psp.ps1 -Game bbs -Stage regen|build|r
 Inputs (local only): `extracted\KingdomHeartsBirthBySleep\` (`decrypted\EBOOT.BIN.dec`,
 `disc-files\`, corpus `generated-psprecomp-fixed32k\`, or `generated-v2\` after a regen).
 
-## Current state (2026-10-26): doesn't build yet
+## Current state (2026-10-27, work-PC review): builds, links, first run stops on unlifted code
 
-The 10/24 build (`logs\bbs_build_20261024.log`) fails with **42 errors** in units
-0042 0069 0074 0079 0101 0103 0105 0106 0107 0110:
-`'recomp_unit_NNNN': undeclared identifier` inside `invoke_chained_direct<...>`.
-
-**Cause:** the corpus is from 10/19 12:22, before the codegen fix (PW was regenerated at 13:10)
-that sends jumps into units outside the corpus through `invoke_chained_call`.
-`psp_recomp.exe` (10/19 14:35) already has the fix.
-
-**Next:** `.\psp.ps1 -Game bbs -Stage regen` (about 30 s), then `-Stage build`. The build picks up
-`generated-v2` automatically.
+- Run stops 0.1 s in: `invalid internal function entry` at `0x0880A5DC`. **Not a deadlock and not
+  a reason to park**: it's unlifted code (`.\psp.ps1 lifted 0x0880A5DC -Game bbs`: no label, no mention).
+- `0x0880A5DC` is a real function (`addiu sp,sp,-16` right after a `jr ra`). Its only reference is
+  the first word of **`.cplinit`** (`0x08B30970`, 0x320 bytes = 100 `{func, 0}` pairs): SNC's C++
+  static-initializer table. All 99 functions in it were unlifted.
+- Cause: BBS's EBOOT is a fixed ELF (type 2, **no relocations**), and SNC links `.cplinit`, `.rodata`
+  (vtables) and `.data` into the *executable* segment. Codegen took data-pointer seeds only from
+  non-executable segments and from R_MIPS_32 relocations, so it saw none of them. Words in those
+  sections that point into code but have no label: `.rodata` ~10.7k, `.data` ~7.4k,
+  `.linkonce.d` ~1.3k (some will be jump-table or mid-function targets, not functions).
+- **Fix: psp-native-runtime `5adcf15`** (not compiled on the work PC). `collect_relocated_data_code_pointers`
+  in `src\program_analysis.cpp` now also scans allocated, non-executable PROGBITS sections inside
+  executable segments of a fixed ELF, and seeds only words that land in an executable section.
+  PRX modules (KJFS, zlibdec) are unchanged.
+- Expect after regen: `function seeds` well above 12,533 and `registered blocks` above 109,599; a
+  larger corpus and a longer first build. Then `L_0880A5DC:` exists in `generated_unit_0000.cpp`.
 
 ## 2026-10-27: regen done, build still fails — shared-codegen root cause (parked)
 
