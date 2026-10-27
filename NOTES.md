@@ -56,7 +56,8 @@ compile error for calls into units with nothing to dispatch.
   base gets a direct call to `recomp_unit_<bucket>`, even when that bucket was never generated.
   Units 113–115 lie past the end of the generated range (`0x08804000 + 113*0x8000 = 0x08B8C000`).
   Example: `generated-v2\generated_unit_0042.cpp:3299`.
-- **Fix (one line):** make line 1101 match line 897:
+- **Applied 2026-10-27 in psp-native-runtime `68d027a`** (not compiled on the work PC). The change:
+  make line 1101 match line 897:
   `const bool direct_unit = function.unit_span_bytes != 0u && target >= function.executable_base &&`
   `    function.direct_entry_ids != nullptr && function.direct_entry_ids->contains(target);`
   The existing `if (!direct_unit)` branches then emit `ctx.pc = target` + `invoke_chained_call`.
