@@ -31,9 +31,15 @@ private:
     void load_module_by_id(psprecomp::AllegrexContext &);
     void start_module(psprecomp::Runtime &, psprecomp::AllegrexContext &);
     void unload_module(psprecomp::AllegrexContext &);
+    // The async variants (open/close/read/write/seek-Async) complete inline on
+    // this cooperative host; their result is kept per-fd for sceIoWaitAsync /
+    // sceIoWaitAsyncCB / sceIoPollAsync (all: int (SceUID fd, SceInt64 *res)).
+    void wait_async(psprecomp::Runtime &, psprecomp::AllegrexContext &);
+    void note_async_result(psprecomp::AllegrexContext &, bool fd_is_result);
 
     std::int32_t next_fd_{3};
     std::map<std::int32_t, OpenFile> files_;
+    std::map<std::int32_t, std::uint32_t> async_results_;
     std::int32_t next_module_uid_{0x600};
     std::unordered_set<std::int32_t> modules_;
 };

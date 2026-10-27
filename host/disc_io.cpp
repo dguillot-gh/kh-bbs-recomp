@@ -32,18 +32,49 @@ void DiscIo::install_hles(psprecomp::Runtime &runtime) {
     // open-async/close-async/read-async/write-async/seek-async are the exact same
     // operations, just without a callback. (sceIoCloseAsync NID 0xFF5940B6 was the
     // KJFS-worker blocker on 10/22: it opened libfont/TITLEID and closed the last fd.)
+    // Each Async variant completes inline; note_async_result keeps the per-fd
+    // outcome so sceIoWaitAsync/WaitAsyncCB below can answer with it.
+    // (fd is the open result itself; the others take it in a0.)
     runtime.register_hle("IoFileMgrForUser", 0x89AA9906u,
-        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { open(rt, ctx); });
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            open(rt, ctx);
+            note_async_result(ctx, true);
+        });
     runtime.register_hle("IoFileMgrForUser", 0xFF5940B6u,
-        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { close(ctx); });
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            close(ctx);
+            note_async_result(ctx, false);
+        });
     runtime.register_hle("IoFileMgrForUser", 0xA0B5A7C2u,
-        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { read(rt, ctx); });
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            read(rt, ctx);
+            note_async_result(ctx, false);
+        });
     runtime.register_hle("IoFileMgrForUser", 0x0FACAB19u,
-        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { write(rt, ctx); });
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            write(rt, ctx);
+            note_async_result(ctx, false);
+        });
+    // sceIoLseekAsync / sceIoLseek32Async (the plain Lseek/Lseek32 pair below is sync).
     runtime.register_hle("IoFileMgrForUser", 0x71B19E77u,
-        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { seek(ctx); });
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            seek(ctx);
+            note_async_result(ctx, false);
+        });
     runtime.register_hle("IoFileMgrForUser", 0x1B385D8Fu,
-        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { seek(ctx); });
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            seek(ctx);
+            note_async_result(ctx, false);
+        });
+    // PSP SDK form for all three: int (SceUID fd, SceInt64 *res). Ops complete
+    // inline on this cooperative host, so the stored per-fd result is final:
+    // wait_async writes it as a sign-extended 64-bit value to *res and returns 0.
+    runtime.register_hle("IoFileMgrForUser", 0xE23EEC33u,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { wait_async(rt, ctx); });
+    runtime.register_hle("IoFileMgrForUser", 0x35DBD746u,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { wait_async(rt, ctx); });
+    runtime.register_hle("IoFileMgrForUser", 0x3251EA56u,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { wait_async(rt, ctx); });
     runtime.register_hle("IoFileMgrForUser", 0x27EB27B8u,
         [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { seek(ctx); });
     runtime.register_hle("IoFileMgrForUser", 0x68963324u,
@@ -198,6 +229,53 @@ void DiscIo::seek(psprecomp::AllegrexContext &ctx) {
         ctx.set_gpr(2u, kIoErrorInvalidArgument); return;
     }
     ctx.set_gpr(2u, static_cast<std::uint32_t>(position));
+}
+
+namespace {
+bool io_trace_on() { return std::getenv("PSPRECOMP_IO_TRACE") != nullptr; }
+}
+
+void DiscIo::note_async_result(psprecomp::AllegrexContext &ctx, bool fd_is_result) {
+    const std::uint32_t result = ctx.gpr[2u];
+    const std::int32_t fd = fd_is_result
+        ? (result >= 0x80000000u ? -1 : static_cast<std::int32_t>(result))
+        : static_cast<std::int32_t>(ctx.gpr[4u]);
+    if (fd < 0) return;
+    async_results_[fd] = result;
+    if (io_trace_on()) {
+        std::cerr << "[io-async] fd=" << fd << " result=0x" << std::hex << result << std::dec << "\n";
+    }
+}
+
+void DiscIo::wait_async(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) {
+    // PSP SDK: int (SceUID fd, SceInt64 *res). Same contract for sceIoWaitAsync,
+    // sceIoWaitAsyncCB and sceIoPollAsync: ops complete inline on this host, so
+    // the stored per-fd result is final — write it as a sign-extended 64-bit
+    // value to *res and return 0. No pending op for that fd: 0x80020329.
+    const auto fd = static_cast<std::int32_t>(ctx.gpr[4u]);
+    const std::uint32_t res = ctx.gpr[5u];
+    const auto found = async_results_.find(fd);
+    if (found == async_results_.end()) {
+        if (io_trace_on())
+            std::cerr << "[io-waitasync] fd=" << fd << " ret=0x80020329 (no async result)\n";
+        ctx.set_gpr(2u, 0x80020329u);
+        return;
+    }
+    if (!runtime.memory().contains(res, 8u)) {
+        if (io_trace_on())
+            std::cerr << "[io-waitasync] fd=" << fd << " res=0x" << std::hex << res << std::dec
+                      << " ret=0x80010016 (bad res)\n";
+        ctx.set_gpr(2u, kIoErrorInvalidArgument);
+        return;
+    }
+    const std::uint32_t result = found->second;
+    runtime.memory().store32(res, result);
+    runtime.memory().store32(res + 4u, (result & 0x80000000u) ? 0xFFFFFFFFu : 0u);
+    if (io_trace_on()) {
+        std::cerr << "[io-waitasync] fd=" << fd << " result=0x" << std::hex << result
+                  << std::dec << " ret=0\n";
+    }
+    ctx.set_gpr(2u, 0u);
 }
 
 namespace {
