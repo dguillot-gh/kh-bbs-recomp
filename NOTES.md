@@ -26,6 +26,20 @@ Inputs (local only): `extracted\KingdomHeartsBirthBySleep\` (`decrypted\EBOOT.BI
 - **Next:** `.\psp.ps1 -Game bbs -Stage run -Trace -Env @{ PSPRECOMP_IO_TRACE = '1'; PSPRECOMP_WATCH_WRITE = '0x09A7A668'; PSPRECOMP_WATCH_WRITE_SIZE = '1' }`.
   Look for: the DiscInfoBind create/start lines, whether it ever runs, its `[io-open]` of
   `BBS%d.DAT`, its last HLE before it sleeps, and any `[watch-write]` on the flag.
+- **Step 1 traced run (20261027-174943-run.log, 47.8 MB):**
+  1. DiscInfoBind **created** (uid=2, entry=0x0880F750, priority=20, log line 109) and
+     **started** (`sceKernelStartThread` 0xF475845D a0=2, returned OK, lines 113-114).
+  2. **Never ran:** 0 `[pw-thread] switch` to uid=2 in the whole log; 0 `[io-open]`/`[io-`
+     lines (no `BBS%d.DAT` open at all).
+  3. Last HLE before the stop: `ThreadManForUser::0x68DA9E36` (DelayThreadCB 33334us) by
+     user_main at 0x0880F6F8, repeating to the dispatch cap.
+  4. Flag 0x09A7A668: only two writes — init zero and user_main store8 `new=0x0` (line 107).
+     Nothing set it to 1.
+  5. Root cause: `delay_yield` (thread_manager.cpp:619) re-enqueues the delaying thread as
+     Ready and competes on priority: user_main (19) beats DiscInfoBind (20) every round, so
+     the started thread is never scheduled. PW's host has no delay HLE, so this is BBS-only.
+  6. Fix (step 2): in `delay_yield`, the delaying thread loses the scheduling round to any
+     ready peer (priority bumped to 0xFFFFFFFF around `activate_next`, restored after).
 - The `0x0880A5DC` unlifted-code stop below is fixed (the `5adcf15` seed fix; `.\psp.ps1 lifted
   0x0880A5DC -Game bbs` now says `lifted: yes`). The rest of this block is the earlier diagnosis.
 - (Earlier, work-PC review) run stops 0.1 s in: `invalid internal function entry` at `0x0880A5DC`. **Not a deadlock and not
