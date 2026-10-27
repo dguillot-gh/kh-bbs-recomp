@@ -7,11 +7,25 @@ Build and run from the workspace root: `.\psp.ps1 -Game bbs -Stage regen|build|r
 Inputs (local only): `extracted\KingdomHeartsBirthBySleep\` (`decrypted\EBOOT.BIN.dec`,
 `disc-files\`, corpus `generated-psprecomp-fixed32k\`, or `generated-v2\` after a regen).
 
-## Current state (2026-10-27, home PC): reaches the main loop; run stops at dispatch cap 300000
+## Current state (2026-10-27, work-PC review): spins in a wait loop for the "DiscInfoBind" thread
 
-- BBS is running: after 6 HLE cycles (see the cycle log below), the game reaches its main loop
-  and the run exits 0: `STOP: Runtime stopped: Dispatch limit reached at 0x0880F6F8` (cap
-  300000) — no missing HLEs, no deadlock, no unlifted code. 6-cycle cap reached; loop parked.
+- After 6 HLE cycles (cycle log below) the run exits 0 at the dispatch cap:
+  `Dispatch limit reached at 0x0880F6F8` (cap 300000). No missing HLE, no unlifted code.
+- **It is not the main loop.** `generated_unit_0001.cpp` ~8020-8090, function around
+  `L_0880F654`:
+  1. `sceKernelCreateThread` (stub `0x08B30658`, via `0x088C54C4`) and `sceKernelStartThread`
+     (stub `0x08B305F8`, via `0x088C54E0`) start a thread named **"DiscInfoBind"** (string at
+     `0x08B3142C`; the next string is `disc0:/PSP_GAME/USRDIR/BBS%d.DAT`).
+  2. Loop at `L_0880F6F0`: `sceKernelDelayThreadCB(33334)` → call `0x08816918` (reads the bytes
+     at `0x08B5BE41/42`, probably an exit-request check) → if it returns 0, test the byte at
+     `0x09A7A668` (`s0 = 0x09A80000`, offset -22936) and loop while it's 0.
+  3. So the main thread waits for DiscInfoBind to set that byte, presumably after it opens and
+     indexes BBS0-4.DAT. Our `DelayThreadCB` yields only to a *Ready* thread. If DiscInfoBind
+     is asleep in a wait nobody completes, or exited early, the main thread spins until the
+     budget runs out.
+- **Next:** `.\psp.ps1 -Game bbs -Stage run -Trace -Env @{ PSPRECOMP_IO_TRACE = '1'; PSPRECOMP_WATCH_WRITE = '0x09A7A668'; PSPRECOMP_WATCH_WRITE_SIZE = '1' }`.
+  Look for: the DiscInfoBind create/start lines, whether it ever runs, its `[io-open]` of
+  `BBS%d.DAT`, its last HLE before it sleeps, and any `[watch-write]` on the flag.
 - The `0x0880A5DC` unlifted-code stop below is fixed (the `5adcf15` seed fix; `.\psp.ps1 lifted
   0x0880A5DC -Game bbs` now says `lifted: yes`). The rest of this block is the earlier diagnosis.
 - (Earlier, work-PC review) run stops 0.1 s in: `invalid internal function entry` at `0x0880A5DC`. **Not a deadlock and not
