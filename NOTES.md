@@ -75,6 +75,38 @@ compile error for calls into units with nothing to dispatch.
 - Later: RemasteredControls behavior (second stick moves the camera, plus its control-type and L-trigger
   handling), rebuilt as native input code.
 
+- 10/27 (home PC): **step 1: done.** Rebuilt `psp_recomp` with the 68d027a jal fix
+  (had to wipe stale CMakeCache from the work PC's D: tree; reconfigured with local
+  VS 2026 Community). Build clean.
+- 10/27 (home PC): **step 2: done.** Regen: OK, 113 units / 481,005 instructions.
+- 10/27 (home PC): **step 3: done.** Build OK (exit 0) — BBSBringup.exe linked.
+  The 32 `recomp_unit_0113/0114/0115` errors are gone; previously failing units
+  0042/0069/0074/0079/0105/0107 now compile (cached objects from before, only
+  those 6 recompiled). Confirmed regenerated code at 0042:3299 now emits
+  `ctx.pc = 0x08B8D634u; rt.invoke_chained_call(...)`.
+- 10/27 (home PC): **step 4: first run, HLE 1/5, then PARKED (exit 0).**
+  - Run 1: exit 3, missing `SysMemUserForUser::0x35669D4C` =
+    `sceKernelSetCompiledSdkVersion600_602`. Fixed: registered it next to the
+    existing 5.00-5.50 variant (0x91DE343C) in `host\main.cpp` (same lambda,
+    `compiled_sdk_version = ctx.gpr[4]`, return 0). Added NID to
+    `psp-native-runtime\configs\nids.csv` + `src\nid_registry.cpp`.
+  - Run 2: build OK; run **exit 0** — immediate stop, 0.1 s in:
+    `Runtime stopped: Unsupported Allegrex instruction 0x00000000 at 0x0880A5DC: invalid internal function entry`
+    Both version-set HLEs succeeded first (banner shows `Compiled SDK version:
+    100794384` = 0x06020010, `Compiler version: 197382`), so this is the first
+    dispatch back into guest code after `SetCompiledSdkVersion600_602`.
+    `0x0880A5DC` = `0x08804000 + 0x65DC`, inside unit 0000, but not a
+    registered entry of that unit (codegen's entries table doesn't contain it,
+    so the runtime rejects the internal jump).
+    13 lines before (all of them): harness banner only (ELF/Entry/GP/
+    Relocations/Functions/Dispatch cap/versions) — no dispatch trace lines,
+    log is 14 lines total. Per session rule, exit 0 → recorded and BBS parked.
+  - **Next lead (fresh session):** why is 0x0880A5DC not an entry of unit 0000
+    (check codegen entry collection for that address; likely a `jalr`/`jr`
+    target via a register that codegen treats as out-of-unit). Grep
+    `generated-v2\generated_unit_0000.cpp` for `0x0880A5DC` to see how it is
+    referenced.
+
 ## What worked
 - 10/19: corpus generated, 113 units / 481,005 instructions / 281 import wrappers
   (needs regenerating, see above).

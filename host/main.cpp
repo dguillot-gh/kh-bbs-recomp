@@ -105,6 +105,12 @@ int main(int argc, char **argv) {
                 compiled_sdk_version = ctx.gpr[4u];
                 ctx.set_gpr(2u, 0u);
             });
+        runtime.register_hle("SysMemUserForUser", 0x35669D4Cu,
+            [&compiled_sdk_version](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                // sceKernelSetCompiledSdkVersion600_602 (SDK 6.00-6.02 variant).
+                compiled_sdk_version = ctx.gpr[4u];
+                ctx.set_gpr(2u, 0u);
+            });
         runtime.register_hle("SysMemUserForUser", 0xF77D77CBu,
             [&compiler_version](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
                 compiler_version = ctx.gpr[4u];
