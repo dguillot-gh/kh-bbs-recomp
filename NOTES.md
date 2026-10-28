@@ -7,7 +7,7 @@ Build and run from the workspace root: `.\psp.ps1 -Game bbs -Stage regen|build|r
 Inputs (local only): `extracted\KingdomHeartsBirthBySleep\` (`decrypted\EBOOT.BIN.dec`,
 `disc-files\`, corpus `generated-psprecomp-fixed32k\`, or `generated-v2\` after a regen).
 
-## Session 2026-10-28 (home PC): S1 done — PGD archives decrypted, loader passes
+## Current: session 2026-10-28 (home PC), S1 done — PGD archives decrypted, loader passes
 
 - **Correction to the review below:** the PGD archives use **three different keys**, not one.
   All three sit contiguously at EBOOT file offset `0x32E3D8` (VA `0x08B313D8`), 16 bytes each:
@@ -136,7 +136,7 @@ What went wrong in our host:
     what 0x62 means.
   - Per session rule (BUDGET USED → record, stop): **BBS loop ended here.**
 
-## Current state (2026-10-27, home PC): BBS0+BBS1 complete; guest exits the thread — parked on BUDGET USED
+## Earlier (2026-10-27, home PC): BBS0+BBS1 complete; guest exits the thread — parked on BUDGET USED
 
 - **BBS0 + BBS1 now complete (2026-10-27, home PC).** BBS0: getstat `lbn=58032` → raw-ISO
   `sceIoOpen("umd1:")` fd=3 → 64-bit seek 58032 → `[io-read] raw units=112` ✓. BBS1: getstat
