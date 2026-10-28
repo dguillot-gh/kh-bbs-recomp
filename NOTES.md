@@ -42,6 +42,12 @@ What went wrong in our host:
 ## Session 2026-10-27 (home PC, evening)
 
 - step 1: done — build OK, no host compile fixes needed (20261027-192621-build.log).
+- step 2: done — banner `ISO: ... (863024 sectors)` ✓; getstat BBS0 `lbn=58032` ✓; `[io-open] raw ISO fd=3` ✓;
+  seek 58032 + `[io-read] raw units=112` (first block) ✓. **First deviation:** BBS1.DAT was opened as a plain
+  file (`disc0:/PSP_GAME/USRDIR/BBS1.DAT`, fd=4) and then `IoFileMgrForUser::0x63632449`
+  (sceIoIoctl/sceIoDevctl; args fd=4, cmd=0x04100001, indata=0x08B313D8, inlen=0x10) → **exit 3, not
+  registered in any host**. 10 lines before: async read of 112 sectors on fd=3 + waitasync OK, then
+  getstat/open of BBS1. No watch-write of 0x09A7A668 yet (log 20261027-192743-run.log).
 
 ## Current state (2026-10-27, home PC): DiscInfoBind runs its UMD probe but never sets the done-flag
 
