@@ -7,6 +7,17 @@ Build and run from the workspace root: `.\psp.ps1 -Game bbs -Stage regen|build|r
 Inputs (local only): `extracted\KingdomHeartsBirthBySleep\` (`decrypted\EBOOT.BIN.dec`,
 `disc-files\`, corpus `generated-psprecomp-fixed32k\`, or `generated-v2\` after a regen).
 
+## Current review 2026-10-28 evening (work PC, read first): the S3 crash is a dangling lambda capture (fixed, not built)
+
+- `host\thread_manager.cpp`, the 4 vblank waits (~692) and SleepThread(CB) (~703) were
+  registered with `[this, &delay_yield]`: a reference to a local lambda of `install_hles`. It dies
+  when `install_hles` returns; the first vblank/sleep call read garbage as `this` and crashed at
+  `current_uid_`. Not heap corruption, not a BBS handler's OOB write. The review changed both to
+  `[this, delay_yield]`.
+- Rule: a lambda given to `register_hle` never captures a local by reference (`main()` locals are
+  fine: they live for the whole run).
+- Next: SESSION-PLAN.md S3b (build, run, then copy PW's S2c scheduler fix).
+
 ## Current: session 2026-10-28 (home PC), S3 — into the frame loop (GE shim + display/ctrl in; crashes in delay_yield)
 
 - **Step 1 (done):** copied PW's GE shim + display/ctrl handlers from `mgs-peace-walker\host\`

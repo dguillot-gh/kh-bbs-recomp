@@ -689,7 +689,7 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
     // capture land later (S4/S11).
     for (const std::uint32_t nid : {0x984C27E7u, 0x46F186C3u, 0x36CDFADEu, 0x8EB9EC49u}) {
         runtime.register_hle("sceDisplay", nid,
-            [this, &delay_yield](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            [this, delay_yield](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
                 ++vblank_count;
                 delay_yield(rt, ctx);
             });
@@ -700,7 +700,7 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
     // If sceKernelWakeupThread marked this thread, return at once (PW S2b).
     for (const std::uint32_t nid : {0x9ACE131Eu, 0x82826F70u}) {
         runtime.register_hle("ThreadManForUser", nid,
-            [this, &delay_yield](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            [this, delay_yield](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
                 const auto self = threads_.find(current_uid_);
                 if (self != threads_.end() && self->second.wakeup > 0u) {
                     self->second.wakeup -= 1u;
