@@ -54,16 +54,31 @@ if(NOT EXISTS "${BBS_GENERATED_DIR}/generated_registry.cpp")
     message(FATAL_ERROR "generated_registry.cpp is missing from ${BBS_GENERATED_DIR}")
 endif()
 
+# VCS software renderer + its dependencies, compiled unchanged from
+# psp-native-runtime/profiles/vcs/host (roadmap phase 2 step 1, the way
+# sw-renegade-squadron reused them). Link-checked on the work PC 10/28: these 9
+# files + d3d12/dxgi/d3dcompiler resolve every symbol. Nothing calls them yet;
+# vcs_draw_distance_patch only runs from install_project2dfx, which we never call.
+set(PSP_VCS_HOST_DIR "${PSPRECOMP_RUNTIME_DIR}/profiles/vcs/host")
+set(PSP_VCS_RENDERER_SOURCES)
+foreach(name framebuffer_capture ge_renderer ge_gpu_backend_dx12 vcs_config
+        vcs_fps_overlay vcs_project2dfx vcs_project2dfx_lights
+        vcs_draw_distance_patch vcs_runtime_log)
+    list(APPEND PSP_VCS_RENDERER_SOURCES "${PSP_VCS_HOST_DIR}/${name}.cpp")
+endforeach()
+
 add_executable(BBSBringup
     host/main.cpp
     host/disc_io.cpp
     host/thread_manager.cpp
     host/partition_memory.cpp
-    # Frame dumps (PSPRECOMP_FRAME_DUMP_DIR): VCS's capture code, unchanged.
-    "${PSPRECOMP_RUNTIME_DIR}/profiles/vcs/host/framebuffer_capture.cpp"
+    ${PSP_VCS_RENDERER_SOURCES}
     "${BBS_GENERATED_DIR}/generated_registry.cpp"
     ${BBS_GENERATED_UNITS})
 target_link_libraries(BBSBringup PRIVATE psprecomp_core)
+if(WIN32)
+    target_link_libraries(BBSBringup PRIVATE d3d12 dxgi d3dcompiler dxguid)
+endif()
 target_include_directories(BBSBringup PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/host" "${BBS_GENERATED_DIR}"
     "${PSPRECOMP_RUNTIME_DIR}/profiles/vcs/host")
