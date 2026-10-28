@@ -7,6 +7,38 @@ Build and run from the workspace root: `.\psp.ps1 -Game bbs -Stage regen|build|r
 Inputs (local only): `extracted\KingdomHeartsBirthBySleep\` (`decrypted\EBOOT.BIN.dec`,
 `disc-files\`, corpus `generated-psprecomp-fixed32k\`, or `generated-v2\` after a regen).
 
+## Review 2026-10-27 (work PC, evening): why DiscInfoBind quits, and the fix (not built)
+
+DiscInfoBind (`L_0880F750`, `generated_unit_0001.cpp`) loads `BBS%d.DAT` for d = 0..4 and sets the
+flag at `0x09A7A668` only if all five succeed. The loader `L_0880E170` → `L_0880EBD4`:
+1. `sceIoGetstat("disc0:/PSP_GAME/USRDIR/BBS0.DAT", sp)`: size from `st_size`, and
+   **`st_private[0]` (stat+0x40) = the file's starting sector on the UMD** → handle+4.
+2. With index 0 it takes the **raw UMD** path: `sceUmdGetDriveStat`, lock, `sceIoOpen("umd1:")`
+   (the whole disc as a block device), unlock.
+3. `L_088111D4(fd, lbn, buf, sectors)`: seek and read whole 2048-byte sectors from umd1:.
+
+What went wrong in our host:
+- **`sceIoGetstat` cleared 280 bytes** of an 88-byte `SceIoStat` on the thread's stack. That
+  wiped `L_0880EBD4`/`L_0880E170`'s saved registers and return addresses, so after the umd1:
+  open the thread "returned" to 0 (`psp_thread_return` in the trace) and never got to the read.
+  The stat layout was also wrong: date stamps from 0x0C overwrote the high half of `st_size`.
+- umd1: was a dummy fd with nothing behind it, and `st_private[0]` was 0.
+- `sceIoLseek`/`LseekAsync` read the offset from a1 and whence from a2. They're 64-bit:
+  offset a2:a3, whence t0, result v0:v1.
+
+**Fixed in `host\disc_io.*` + `host\main.cpp`:**
+- Real 0x58-byte `SceIoStat`, with `st_private[0]` = the LBN from the ISO's directory.
+- `umd0:`/`umd1:`/`umd:` open a block device on the ISO (seek/read in sectors).
+  `disc0:/sce_lbn0x.._size0x..` opens a byte range of the ISO.
+- ISO = `PSPRECOMP_ISO`, else the first `*.iso` next to `disc-files\`. The banner prints `ISO: ...`.
+  Checked with Python against the real ISO: BBS0.DAT is LBN 58032, sizes and first 4 KB match
+  the extracted files.
+- 64-bit seeks. Message-pipe `result` pointer from t0 and `sceIoDevctl` outdata from t0 (same
+  convention bug as PW; see PW NOTES).
+- **Expect:** `[io-getstat] ... lbn=58032`, `[io-open] raw ISO fd=N block`, then `[io-seek]` /
+  `[io-read] raw` lines for BBS0..4, then a `[watch-write]` setting `0x09A7A668` to 1, and the
+  main thread leaving its wait loop.
+
 ## Current state (2026-10-27, home PC): DiscInfoBind runs its UMD probe but never sets the done-flag
 
 - **Step 2 done (2026-10-27, home PC).** Two fixes landed this session: (1) `delay_yield` in

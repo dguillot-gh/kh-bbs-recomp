@@ -314,8 +314,8 @@ int main(int argc, char **argv) {
             [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
                 const std::string device = rt.memory().read_c_string(ctx.gpr[4u], 32u);
                 if (ctx.gpr[5u] == 0x02425823u && device == "fatms0:") {
-                    // The fifth sceIoDevctl argument is the first stack arg.
-                    const std::uint32_t output = rt.memory().load32(ctx.gpr[29u] + 16u);
+                    // The fifth sceIoDevctl argument (outdata) is in t0 (args 5-8 are t0-t3).
+                    const std::uint32_t output = ctx.gpr[8u];
                     if (output == 0u || !rt.memory().contains(output, 4u)) {
                         ctx.set_gpr(2u, 0x80010016u);
                         return;
@@ -476,6 +476,21 @@ int main(int argc, char **argv) {
         threads.install_hles(runtime);
         bbs::PartitionMemory partition_memory;
         bbs::DiscIo disc_io;
+        // Raw UMD reads (umd1: + the LBN from sceIoGetstat) need the real disc image.
+        // PSPRECOMP_ISO, else the first *.iso next to the disc-files folder.
+        {
+            std::filesystem::path iso;
+            if (const char *forced = std::getenv("PSPRECOMP_ISO"); forced != nullptr && *forced != '\0') {
+                iso = forced;
+            } else {
+                std::error_code iso_error;
+                for (const auto &entry : std::filesystem::directory_iterator(disc_root.parent_path(), iso_error)) {
+                    if (entry.is_regular_file() && entry.path().extension() == ".iso") { iso = entry.path(); break; }
+                }
+            }
+            if (iso.empty()) std::cerr << "ISO:        none found; raw umd0:/umd1: reads will fail\n";
+            else disc_io.set_iso(iso);
+        }
         partition_memory.initialize(runtime, static_cast<std::uint32_t>(arena_start));
         partition_memory.set_stack_floor_source([&threads] { return threads.stack_floor(); });
         threads.set_heap_end_source([&partition_memory] { return partition_memory.high_watermark(); });

@@ -284,12 +284,10 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
             if (found == message_pipes_.end() || size == 0u || !rt.memory().contains(source, size)) {
                 set_error(ctx, found == message_pipes_.end() ? 0x80020199u : 0x80020190u); return;
             }
-            const std::uint32_t stack = ctx.gpr[29u];
-            // The first stacked PSP argument (timeout) is at sp+0 and the
-            // optional resultSize pointer is at sp+4.  sp+16 is our wrapper's
-            // saved return address and must never be treated as an argument.
-            const std::uint32_t result_ptr = rt.memory().contains(stack + 4u, 4u)
-                ? rt.memory().load32(stack + 4u) : 0u;
+            // Arg 5 (int *result) is in t0; args 5-8 are t0-t3, not the stack.
+            // Reading [sp+4] wrote the byte count through a stale stack word:
+            // that was PW's "fd 4" in KJFS's device structure (10/27).
+            const std::uint32_t result_ptr = ctx.gpr[8u];
             const auto available = found->second.capacity - static_cast<std::uint32_t>(found->second.bytes.size());
             const std::uint32_t amount = std::min(size, available);
             trace_pipe_io(rt, "send", found->second, uid, size, amount, ctx.gpr[7u], source);
@@ -312,9 +310,10 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
             if (found == message_pipes_.end() || size == 0u || !rt.memory().contains(source, size)) {
                 set_error(ctx, found == message_pipes_.end() ? 0x80020199u : 0x80020190u); return;
             }
-            const std::uint32_t stack = ctx.gpr[29u];
-            const std::uint32_t result_ptr = rt.memory().contains(stack + 4u, 4u)
-                ? rt.memory().load32(stack + 4u) : 0u;
+            // Arg 5 (int *result) is in t0; args 5-8 are t0-t3, not the stack.
+            // Reading [sp+4] wrote the byte count through a stale stack word:
+            // that was PW's "fd 4" in KJFS's device structure (10/27).
+            const std::uint32_t result_ptr = ctx.gpr[8u];
             const auto available = found->second.capacity - static_cast<std::uint32_t>(found->second.bytes.size());
             const std::uint32_t amount = std::min(size, available);
             trace_pipe_io(rt, "send-cb", found->second, uid, size, amount, ctx.gpr[7u], source);
@@ -337,9 +336,10 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
             if (found == message_pipes_.end() || size == 0u || !rt.memory().contains(source, size)) {
                 set_error(ctx, found == message_pipes_.end() ? 0x80020199u : 0x80020190u); return;
             }
-            const std::uint32_t stack = ctx.gpr[29u];
-            const std::uint32_t result_ptr = rt.memory().contains(stack + 4u, 4u)
-                ? rt.memory().load32(stack + 4u) : 0u;
+            // Arg 5 (int *result) is in t0; args 5-8 are t0-t3, not the stack.
+            // Reading [sp+4] wrote the byte count through a stale stack word:
+            // that was PW's "fd 4" in KJFS's device structure (10/27).
+            const std::uint32_t result_ptr = ctx.gpr[8u];
             const auto available = found->second.capacity - static_cast<std::uint32_t>(found->second.bytes.size());
             const std::uint32_t amount = std::min(size, available);
             trace_pipe_io(rt, "try-send", found->second, uid, size, amount, ctx.gpr[7u], source);
@@ -358,9 +358,10 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
             if (found == message_pipes_.end() || size == 0u || !rt.memory().contains(destination, size)) {
                 set_error(ctx, found == message_pipes_.end() ? 0x80020199u : 0x80020190u); return;
             }
-            const std::uint32_t stack = ctx.gpr[29u];
-            const std::uint32_t result_ptr = rt.memory().contains(stack + 4u, 4u)
-                ? rt.memory().load32(stack + 4u) : 0u;
+            // Arg 5 (int *result) is in t0; args 5-8 are t0-t3, not the stack.
+            // Reading [sp+4] wrote the byte count through a stale stack word:
+            // that was PW's "fd 4" in KJFS's device structure (10/27).
+            const std::uint32_t result_ptr = ctx.gpr[8u];
             const std::uint32_t amount = std::min(size, static_cast<std::uint32_t>(found->second.bytes.size()));
             trace_pipe_io(rt, "receive", found->second, uid, size, amount, ctx.gpr[7u], destination);
             if (amount == 0u && ctx.gpr[7u] == 0u) {
@@ -372,14 +373,8 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
                 found->second.bytes.pop_front();
             }
             if (result_ptr != 0u && rt.memory().contains(result_ptr, 4u)) rt.memory().store32(result_ptr, amount);
-            // The KJFS import wrappers seed a zero result slot at the top of
-            // their 32-byte frame and their epilogues return that word as the
-            // received byte count. Deliver `amount` there (plus v0, per the
-            // PSP SDK: sceKernel*ReceiveMsgPipe return the byte count) only
-            // while the slot still holds the zero sentinel, so callers that
-            // stack real arguments at sp+0 keep their layout.
-            if (amount > 0u && rt.memory().contains(stack, 4u) && rt.memory().load32(stack) == 0u)
-                rt.memory().store32(stack, amount);
+            // (KJFS's wrappers pass t0 = sp, so the result slot at [sp+0] is
+            // filled through result_ptr above; no separate stack write.)
             if (amount == 0u) { set_error(ctx, 0x800201A8u); return; }
             ctx.set_gpr(2u, amount);
             wake_pipe_waiters(found->second.waiting_writers);
@@ -393,9 +388,10 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
             if (found == message_pipes_.end() || size == 0u || !rt.memory().contains(destination, size)) {
                 set_error(ctx, found == message_pipes_.end() ? 0x80020199u : 0x80020190u); return;
             }
-            const std::uint32_t stack = ctx.gpr[29u];
-            const std::uint32_t result_ptr = rt.memory().contains(stack + 4u, 4u)
-                ? rt.memory().load32(stack + 4u) : 0u;
+            // Arg 5 (int *result) is in t0; args 5-8 are t0-t3, not the stack.
+            // Reading [sp+4] wrote the byte count through a stale stack word:
+            // that was PW's "fd 4" in KJFS's device structure (10/27).
+            const std::uint32_t result_ptr = ctx.gpr[8u];
             const std::uint32_t amount = std::min(size, static_cast<std::uint32_t>(found->second.bytes.size()));
             trace_pipe_io(rt, "receive-cb", found->second, uid, size, amount, ctx.gpr[7u], destination);
             if (amount == 0u && ctx.gpr[7u] == 0u) {
@@ -407,14 +403,8 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
                 found->second.bytes.pop_front();
             }
             if (result_ptr != 0u && rt.memory().contains(result_ptr, 4u)) rt.memory().store32(result_ptr, amount);
-            // The KJFS import wrappers seed a zero result slot at the top of
-            // their 32-byte frame and their epilogues return that word as the
-            // received byte count. Deliver `amount` there (plus v0, per the
-            // PSP SDK: sceKernel*ReceiveMsgPipe return the byte count) only
-            // while the slot still holds the zero sentinel, so callers that
-            // stack real arguments at sp+0 keep their layout.
-            if (amount > 0u && rt.memory().contains(stack, 4u) && rt.memory().load32(stack) == 0u)
-                rt.memory().store32(stack, amount);
+            // (KJFS's wrappers pass t0 = sp, so the result slot at [sp+0] is
+            // filled through result_ptr above; no separate stack write.)
             if (amount == 0u) { set_error(ctx, 0x800201A8u); return; }
             ctx.set_gpr(2u, amount);
             wake_pipe_waiters(found->second.waiting_writers);
@@ -428,9 +418,10 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
             if (found == message_pipes_.end() || size == 0u || !rt.memory().contains(destination, size)) {
                 set_error(ctx, found == message_pipes_.end() ? 0x80020199u : 0x80020190u); return;
             }
-            const std::uint32_t stack = ctx.gpr[29u];
-            const std::uint32_t result_ptr = rt.memory().contains(stack + 4u, 4u)
-                ? rt.memory().load32(stack + 4u) : 0u;
+            // Arg 5 (int *result) is in t0; args 5-8 are t0-t3, not the stack.
+            // Reading [sp+4] wrote the byte count through a stale stack word:
+            // that was PW's "fd 4" in KJFS's device structure (10/27).
+            const std::uint32_t result_ptr = ctx.gpr[8u];
             const std::uint32_t amount = std::min(size, static_cast<std::uint32_t>(found->second.bytes.size()));
             trace_pipe_io(rt, "try-receive", found->second, uid, size, amount, ctx.gpr[7u], destination);
             for (std::uint32_t i = 0; i < amount; ++i) {
@@ -438,14 +429,8 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
                 found->second.bytes.pop_front();
             }
             if (result_ptr != 0u && rt.memory().contains(result_ptr, 4u)) rt.memory().store32(result_ptr, amount);
-            // The KJFS import wrappers seed a zero result slot at the top of
-            // their 32-byte frame and their epilogues return that word as the
-            // received byte count. Deliver `amount` there (plus v0, per the
-            // PSP SDK: sceKernel*ReceiveMsgPipe return the byte count) only
-            // while the slot still holds the zero sentinel, so callers that
-            // stack real arguments at sp+0 keep their layout.
-            if (amount > 0u && rt.memory().contains(stack, 4u) && rt.memory().load32(stack) == 0u)
-                rt.memory().store32(stack, amount);
+            // (KJFS's wrappers pass t0 = sp, so the result slot at [sp+0] is
+            // filled through result_ptr above; no separate stack write.)
             if (amount == 0u) { set_error(ctx, 0x800201A8u); return; }
             ctx.set_gpr(2u, amount);
             wake_pipe_waiters(found->second.waiting_writers);

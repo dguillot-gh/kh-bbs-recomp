@@ -3,6 +3,8 @@
 #include "psprecomp/common.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cstring>
 #include <cstdlib>
 #include <ctime>
 #include <iostream>
@@ -58,12 +60,12 @@ void DiscIo::install_hles(psprecomp::Runtime &runtime) {
     // sceIoLseekAsync / sceIoLseek32Async (the plain Lseek/Lseek32 pair below is sync).
     runtime.register_hle("IoFileMgrForUser", 0x71B19E77u,
         [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
-            seek(ctx);
+            seek(ctx, true);
             note_async_result(ctx, false);
         });
     runtime.register_hle("IoFileMgrForUser", 0x1B385D8Fu,
         [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
-            seek(ctx);
+            seek(ctx, false);
             note_async_result(ctx, false);
         });
     // PSP SDK form for all three: int (SceUID fd, SceInt64 *res). Ops complete
@@ -75,10 +77,10 @@ void DiscIo::install_hles(psprecomp::Runtime &runtime) {
         [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { wait_async(rt, ctx); });
     runtime.register_hle("IoFileMgrForUser", 0x3251EA56u,
         [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { wait_async(rt, ctx); });
-    runtime.register_hle("IoFileMgrForUser", 0x27EB27B8u,
-        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { seek(ctx); });
-    runtime.register_hle("IoFileMgrForUser", 0x68963324u,
-        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { seek(ctx); });
+    runtime.register_hle("IoFileMgrForUser", 0x27EB27B8u,   // sceIoLseek (64-bit)
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { seek(ctx, true); });
+    runtime.register_hle("IoFileMgrForUser", 0x68963324u,   // sceIoLseek32
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { seek(ctx, false); });
     runtime.register_hle("IoFileMgrForUser", 0x06A70004u,
         [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { mkdir(rt, ctx); });
     runtime.register_hle("IoFileMgrForUser", 0xACE946E8u,
@@ -140,6 +142,39 @@ void DiscIo::open(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) 
             std::cerr << "[io-open] path=\"" << psp_path << "\" native=\""
                       << native.string() << "\" create=" << create << "\n";
         }
+        // Raw UMD access, served from the ISO. "umd0:"/"umd1:"/"umd:" with no file
+        // part is the whole disc as a block device (seek/read in 2048-byte sectors);
+        // BBS opens "umd1:" and reads BBS0-4.DAT at the LBN that getstat reported.
+        // "disc0:/sce_lbn0x<lbn>_size0x<bytes>" is a byte view of one sector range.
+        if (const auto colon = psp_path.find(':'); colon != std::string::npos && !write_access) {
+            std::string device = psp_path.substr(0u, colon);
+            std::transform(device.begin(), device.end(), device.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            const std::string rest = psp_path.substr(colon + 1u);
+            const bool block = (device == "umd" || device == "umd0" || device == "umd1") &&
+                (rest.empty() || rest == "/");
+            const auto lbn_at = rest.find("sce_lbn0x");
+            const auto size_at = rest.find("_size0x");
+            const bool range = lbn_at != std::string::npos && size_at != std::string::npos && size_at > lbn_at;
+            if ((block || range) && iso_.is_open()) {
+                OpenFile raw{};
+                raw.readable = true;
+                if (block) {
+                    raw.raw = Raw::Block;
+                    raw.size = iso_bytes_ / 2048u;
+                } else {
+                    const auto lbn = std::stoull(rest.substr(lbn_at + 9u, size_at - lbn_at - 9u), nullptr, 16);
+                    raw.raw = Raw::Range;
+                    raw.base = lbn * 2048u;
+                    raw.size = std::stoull(rest.substr(size_at + 7u), nullptr, 16);
+                }
+                const std::int32_t fd = next_fd_++;
+                files_.emplace(fd, std::move(raw));
+                if (trace) std::cerr << "[io-open] raw ISO fd=" << fd << (block ? " block" : " range") << "\n";
+                ctx.set_gpr(2u, static_cast<std::uint32_t>(fd));
+                return;
+            }
+        }
         if (create) std::filesystem::create_directories(native.parent_path(), error);
         if (!create && !std::filesystem::exists(native, error)) {
             ctx.set_gpr(2u, kIoErrorNotFound); return;
@@ -195,6 +230,28 @@ void DiscIo::read(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) 
         size > static_cast<std::uint32_t>(std::numeric_limits<std::streamsize>::max())) {
         ctx.set_gpr(2u, kIoErrorInvalidArgument); return;
     }
+    OpenFile &file = found->second;
+    if (file.raw != Raw::None) {
+        // Block: size and the result are sectors. Range: bytes, clamped to the range.
+        const std::uint64_t unit = file.raw == Raw::Block ? 2048u : 1u;
+        const std::uint64_t left = file.position < file.size ? file.size - file.position : 0u;
+        const std::uint64_t units = std::min<std::uint64_t>(size, left);
+        const std::uint64_t bytes = units * unit;
+        if (bytes > 0x7FFFFFFFu || !runtime.memory().contains(output, static_cast<std::uint32_t>(bytes))) {
+            ctx.set_gpr(2u, kIoErrorInvalidArgument); return;
+        }
+        std::vector<char> data(static_cast<std::size_t>(bytes));
+        if (bytes != 0u && !read_iso(file.base + file.position * unit, data.data(), data.size())) {
+            ctx.set_gpr(2u, kIoErrorInvalidArgument); return;
+        }
+        for (std::size_t i = 0; i < data.size(); ++i)
+            runtime.memory().store8(output + static_cast<std::uint32_t>(i), static_cast<std::uint8_t>(data[i]));
+        if (std::getenv("PSPRECOMP_IO_TRACE") != nullptr)
+            std::cerr << "[io-read] raw fd=" << fd << " units=" << units << " at=" << file.position << "\n";
+        file.position += units;
+        ctx.set_gpr(2u, static_cast<std::uint32_t>(units));
+        return;
+    }
     std::vector<char> buffer(size);
     found->second.stream.read(buffer.data(), static_cast<std::streamsize>(size));
     const std::streamsize count = found->second.stream.gcount();
@@ -224,25 +281,46 @@ void DiscIo::write(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx)
     ctx.set_gpr(2u, size);
 }
 
-void DiscIo::seek(psprecomp::AllegrexContext &ctx) {
+void DiscIo::seek(psprecomp::AllegrexContext &ctx, bool wide) {
     const auto fd = static_cast<std::int32_t>(ctx.gpr[4u]);
+    const std::int64_t offset = wide
+        ? static_cast<std::int64_t>((static_cast<std::uint64_t>(ctx.gpr[7u]) << 32u) | ctx.gpr[6u])
+        : static_cast<std::int64_t>(static_cast<std::int32_t>(ctx.gpr[5u]));
+    const std::uint32_t whence = wide ? ctx.gpr[8u] : ctx.gpr[6u];
+    const std::int64_t result = seek_to(fd, offset, whence);
+    if (std::getenv("PSPRECOMP_IO_TRACE") != nullptr)
+        std::cerr << "[io-seek] fd=" << fd << " offset=" << offset << " whence=" << whence << " wide=" << wide
+                  << " ret=0x" << std::hex << static_cast<std::uint64_t>(result) << std::dec << "\n";
+    ctx.set_gpr(2u, static_cast<std::uint32_t>(static_cast<std::uint64_t>(result)));
+    if (wide) ctx.set_gpr(3u, static_cast<std::uint32_t>(static_cast<std::uint64_t>(result) >> 32u));
+}
+
+// The new position, or a PSP error code sign-extended to 64 bits.
+std::int64_t DiscIo::seek_to(std::int32_t fd, std::int64_t offset, std::uint32_t whence) {
+    const auto error = [](std::uint32_t code) {
+        return static_cast<std::int64_t>(static_cast<std::int32_t>(code));
+    };
     const auto found = files_.find(fd);
-    if (found == files_.end()) { ctx.set_gpr(2u, kIoErrorBadDescriptor); return; }
-    const std::int32_t offset = static_cast<std::int32_t>(ctx.gpr[5u]);
-    const std::uint32_t whence = ctx.gpr[6u];
+    if (found == files_.end()) return error(kIoErrorBadDescriptor);
+    if (whence > 2u) return error(kIoErrorInvalidArgument);
+    OpenFile &file = found->second;
+    if (file.raw != Raw::None) {
+        const std::int64_t origin = whence == 0u ? 0 :
+            static_cast<std::int64_t>(whence == 1u ? file.position : file.size);
+        const std::int64_t target = origin + offset;
+        if (target < 0) return error(kIoErrorInvalidArgument);
+        file.position = static_cast<std::uint64_t>(target);
+        return target;
+    }
     const std::ios::seekdir direction = whence == 0u ? std::ios::beg :
         (whence == 1u ? std::ios::cur : std::ios::end);
-    if (whence > 2u) { ctx.set_gpr(2u, kIoErrorInvalidArgument); return; }
-    found->second.stream.clear();
-    if (found->second.readable) found->second.stream.seekg(offset, direction);
-    if (found->second.writable) found->second.stream.seekp(offset, direction);
-    if (!found->second.stream) { ctx.set_gpr(2u, kIoErrorInvalidArgument); return; }
-    const auto position = found->second.readable
-        ? found->second.stream.tellg() : found->second.stream.tellp();
-    if (position < 0 || static_cast<std::uint64_t>(position) > 0x7FFFFFFFu) {
-        ctx.set_gpr(2u, kIoErrorInvalidArgument); return;
-    }
-    ctx.set_gpr(2u, static_cast<std::uint32_t>(position));
+    file.stream.clear();
+    if (file.readable) file.stream.seekg(offset, direction);
+    if (file.writable) file.stream.seekp(offset, direction);
+    if (!file.stream) return error(kIoErrorInvalidArgument);
+    const auto position = file.readable ? file.stream.tellg() : file.stream.tellp();
+    if (position < 0) return error(kIoErrorInvalidArgument);
+    return static_cast<std::int64_t>(position);
 }
 
 namespace {
@@ -293,22 +371,27 @@ void DiscIo::wait_async(psprecomp::Runtime &runtime, psprecomp::AllegrexContext 
 }
 
 namespace {
-// SCE IoFstat buffer (SCE_IO_FSTATBUFLEN): mode u16, dev u16, uid u16, gid u16,
-// size u32, then ctime/atime/mtime as local date-times, zero-filled padding.
-const std::uint32_t kFstatSize = 280u;
-void install_stat_buffer(psprecomp::Runtime &runtime, std::uint32_t output, std::int64_t file_size) {
+// SceIoStat, 0x58 bytes: st_mode, st_attr, 64-bit st_size, ctime/atime/mtime
+// as 16-byte ScePspDateTime (u16 year, month, day, hour, minute, second; u32 us)
+// at 0x10/0x20/0x30, then st_private[6] at 0x40. st_private[0] is the file's
+// starting sector on the UMD. Clear exactly 0x58 bytes: the buffer is usually on
+// the guest stack, and the old 280-byte clear wiped the caller's saved registers
+// and return address (BBS's DiscInfoBind thread then "returned" to 0).
+const std::uint32_t kFstatSize = 0x58u;
+void install_stat_buffer(psprecomp::Runtime &runtime, std::uint32_t output, std::int64_t file_size,
+                         std::uint32_t lbn, bool directory) {
     runtime.memory().zero(output, kFstatSize);
-    runtime.memory().store16(output + 0u, 0x81B3u);  // mode: regular file, rwx r-x r-x
-    runtime.memory().store16(output + 2u, 0u);       // dev
-    runtime.memory().store16(output + 4u, 0u);       // uid
-    runtime.memory().store16(output + 6u, 0u);       // gid
-    runtime.memory().store32(output + 8u,
-        file_size >= 0u && file_size <= 0x7FFFFFFFll ? static_cast<std::uint32_t>(file_size) : 0u);
+    // FIO_S_IFDIR/FIO_S_IFREG with r-x for all; FIO_SO_IFDIR/FIO_SO_IFREG.
+    runtime.memory().store32(output + 0x00u, (directory ? 0x1000u : 0x2000u) | 0x016Du);
+    runtime.memory().store32(output + 0x04u, directory ? 0x0010u : 0x0020u);
+    const auto size = static_cast<std::uint64_t>(file_size < 0 ? 0 : file_size);
+    runtime.memory().store32(output + 0x08u, static_cast<std::uint32_t>(size));
+    runtime.memory().store32(output + 0x0Cu, static_cast<std::uint32_t>(size >> 32u));
     std::tm local{};
     const auto now = std::time(nullptr);
     const auto *host_local = std::localtime(&now);
     if (host_local) local = *host_local;
-    for (std::uint32_t stamp = 0x0Cu; stamp <= 0x24u; stamp += 0x0Cu) {
+    for (std::uint32_t stamp = 0x10u; stamp <= 0x30u; stamp += 0x10u) {
         runtime.memory().store16(output + stamp + 0u, static_cast<std::uint16_t>(local.tm_year + 1900));
         runtime.memory().store16(output + stamp + 2u, static_cast<std::uint16_t>(local.tm_mon + 1));
         runtime.memory().store16(output + stamp + 4u, static_cast<std::uint16_t>(local.tm_mday));
@@ -316,6 +399,7 @@ void install_stat_buffer(psprecomp::Runtime &runtime, std::uint32_t output, std:
         runtime.memory().store16(output + stamp + 8u, static_cast<std::uint16_t>(local.tm_min));
         runtime.memory().store16(output + stamp + 10u, static_cast<std::uint16_t>(local.tm_sec));
     }
+    runtime.memory().store32(output + 0x40u, lbn);
 }
 } // namespace
 
@@ -339,8 +423,9 @@ void DiscIo::mkdir(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx)
 
 void DiscIo::getstat(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) {
     std::int64_t file_size = 0;
+    std::string psp_path;
     try {
-        const std::string psp_path = runtime.memory().read_c_string(ctx.gpr[4u], 1024u);
+        psp_path = runtime.memory().read_c_string(ctx.gpr[4u], 1024u);
         const std::filesystem::path native = runtime.translate_path(psp_path);
         std::error_code error;
         if (!std::filesystem::is_regular_file(native, error) || error) {
@@ -354,8 +439,94 @@ void DiscIo::getstat(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ct
     if (!runtime.memory().contains(ctx.gpr[5u], kFstatSize)) {
         ctx.set_gpr(2u, kIoErrorInvalidArgument); return;
     }
-    install_stat_buffer(runtime, ctx.gpr[5u], file_size);
+    std::uint32_t lbn = 0u;
+    if (const auto colon = psp_path.find(':'); colon != std::string::npos) {
+        if (const auto entry = iso_lookup(psp_path.substr(colon + 1u))) lbn = entry->lbn;
+    }
+    if (std::getenv("PSPRECOMP_IO_TRACE") != nullptr)
+        std::cerr << "[io-getstat] \"" << psp_path << "\" size=" << file_size << " lbn=" << lbn << "\n";
+    install_stat_buffer(runtime, ctx.gpr[5u], file_size, lbn, false);
     ctx.set_gpr(2u, 0u);
+}
+
+
+namespace {
+std::uint32_t le32(const unsigned char *p) {
+    return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8u) |
+           (static_cast<std::uint32_t>(p[2]) << 16u) | (static_cast<std::uint32_t>(p[3]) << 24u);
+}
+std::string upper(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(),
+        [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    return text;
+}
+}
+
+void DiscIo::set_iso(const std::filesystem::path &path) {
+    iso_.open(path, std::ios::binary);
+    if (!iso_) { std::cerr << "ISO:        cannot open " << path.string() << "\n"; return; }
+    std::error_code error;
+    iso_bytes_ = std::filesystem::file_size(path, error);
+    char pvd[2048];
+    if (error || !read_iso(16u * 2048u, pvd, sizeof pvd) || pvd[0] != 1 || std::memcmp(pvd + 1, "CD001", 5) != 0) {
+        std::cerr << "ISO:        no ISO 9660 volume descriptor in " << path.string() << "\n";
+        iso_.close();
+        return;
+    }
+    // Primary volume descriptor: the root directory record is at offset 156.
+    const auto *root = reinterpret_cast<const unsigned char *>(pvd + 156);
+    iso_root_ = IsoEntry{le32(root + 2), le32(root + 10), true};
+    std::cerr << "ISO:        " << path.string() << " (" << iso_bytes_ / 2048u << " sectors)\n";
+}
+
+bool DiscIo::read_iso(std::uint64_t offset, char *out, std::size_t length) {
+    if (!iso_.is_open() || offset + length > iso_bytes_) return false;
+    iso_.clear();
+    iso_.seekg(static_cast<std::streamoff>(offset));
+    iso_.read(out, static_cast<std::streamsize>(length));
+    return static_cast<std::size_t>(iso_.gcount()) == length;
+}
+
+std::optional<DiscIo::IsoEntry> DiscIo::iso_lookup(const std::string &path) {
+    if (!iso_root_) return std::nullopt;
+    std::string key = upper(path);
+    std::replace(key.begin(), key.end(), '\\', '/');
+    while (!key.empty() && key.front() == '/') key.erase(key.begin());
+    while (!key.empty() && key.back() == '/') key.pop_back();
+    if (key.empty()) return iso_root_;
+    if (const auto cached = iso_cache_.find(key); cached != iso_cache_.end()) return cached->second;
+
+    IsoEntry current = *iso_root_;
+    std::size_t start = 0u;
+    while (true) {
+        const std::size_t slash = key.find('/', start);
+        const std::string part = key.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
+        if (!current.directory || current.size == 0u) return std::nullopt;
+        std::vector<char> directory(current.size);
+        if (!read_iso(static_cast<std::uint64_t>(current.lbn) * 2048u, directory.data(), directory.size()))
+            return std::nullopt;
+        std::optional<IsoEntry> next;
+        for (std::size_t pos = 0u; pos < directory.size();) {
+            const auto length = static_cast<unsigned char>(directory[pos]);
+            if (length == 0u) { pos = (pos / 2048u + 1u) * 2048u; continue; } // records never cross sectors
+            if (length < 34u || pos + length > directory.size()) break;
+            const auto *record = reinterpret_cast<const unsigned char *>(directory.data() + pos);
+            std::string name(reinterpret_cast<const char *>(record + 33), record[32]);
+            if (const auto version = name.find(';'); version != std::string::npos) name.resize(version);
+            if (!name.empty() && name.back() == '.') name.pop_back();
+            if (upper(name) == part) {
+                next = IsoEntry{le32(record + 2), le32(record + 10), (record[25] & 2u) != 0u};
+                break;
+            }
+            pos += length;
+        }
+        if (!next) return std::nullopt;
+        current = *next;
+        if (slash == std::string::npos) break;
+        start = slash + 1u;
+    }
+    iso_cache_.emplace(key, current);
+    return current;
 }
 
 } // namespace bbs
