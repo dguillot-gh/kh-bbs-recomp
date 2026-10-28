@@ -16,7 +16,11 @@ Inputs (local only): `extracted\KingdomHeartsBirthBySleep\` (`decrypted\EBOOT.BI
   `[this, delay_yield]`.
 - Rule: a lambda given to `register_hle` never captures a local by reference (`main()` locals are
   fine: they live for the whole run).
-- Next: SESSION-PLAN.md S3b (build, run, then copy PW's S2c scheduler fix).
+- **Also written by the review:** PW's S2c scheduler change (states `Asleep`/`Delayed`,
+  `delayed_`, `sleep_thread`/`wake_thread`; `delay_yield` is a member now, so no local lambda
+  is left). Syntax-checked with llvm-mingw clang on the work PC: all host files clean. Not
+  built with MSVC; scheduler_test.cpp passes with it (clang, work PC).
+- Next: SESSION-PLAN.md S3b (build + run).
 
 ## Current: session 2026-10-28 (home PC), S3 — into the frame loop (GE shim + display/ctrl in; crashes in delay_yield)
 

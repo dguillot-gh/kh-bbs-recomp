@@ -20,7 +20,22 @@ public:
     [[nodiscard]] std::uint32_t stack_floor() const noexcept { return next_stack_top_; }
 
 private:
-    enum class State { Created, Ready, Running, Sleeping, Completed };
+    // DelayThread(CB) and the vblank waits: park the caller (State::Delayed)
+    // until no thread is ready, then it runs again ("time passes" only when
+    // the CPU is idle, or after kDelaySwitches switches). Returns 0 to the
+    // caller when it resumes. Same as PW's (S2c, review 10/28).
+    void delay_yield(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx);
+    // SleepThread(CB): block (State::Asleep) until sceKernelWakeupThread, or
+    // return at once if a wakeup is already pending.
+    void sleep_thread(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx);
+    // sceKernelWakeupThread: resume an Asleep thread (switching to it when it
+    // outranks the caller), else count a pending wakeup for its next Sleep.
+    void wake_thread(psprecomp::Runtime &runtime, std::int32_t uid, psprecomp::AllegrexContext &ctx);
+
+    // Sleeping = blocked on a sema/pipe/flag/thread-end (those wake it);
+    // Asleep = in SleepThread (only WakeupThread wakes it); Delayed = in
+    // DelayThread or a vblank wait (resumes when nothing else is ready).
+    enum class State { Created, Ready, Running, Sleeping, Asleep, Delayed, Completed };
 
     struct Thread {
         std::string name;
@@ -32,6 +47,7 @@ private:
         std::uint64_t ready_sequence{};
         psprecomp::AllegrexContext context{};
         std::uint32_t wakeup{0u}; // sceKernelWakeupThread markers (PW S2b).
+        std::uint64_t delay_due{0u}; // Delayed: switches_ value at which the delay is over
     };
 
     struct ReadyItem {
@@ -64,6 +80,13 @@ private:
     std::function<std::uint32_t()> heap_end_source_;
     std::unordered_map<std::int32_t, Thread> threads_;
     std::deque<ReadyItem> ready_;
+    std::vector<std::int32_t> delayed_;  // Delayed threads, oldest first
+    // Virtual clock: thread switches so far. A delay is over after
+    // kDelaySwitches switches even when other threads stay busy (or at once
+    // when nothing else is ready).
+    std::uint64_t switches_{0u};
+    static constexpr std::uint64_t kDelaySwitches = 64u;
+    void dump_threads(const char *why) const;
     std::unordered_map<std::int32_t, std::vector<std::int32_t>> end_waiters_;
     struct Semaphore { std::int32_t count{}; std::int32_t maximum{}; std::vector<std::int32_t> waiting; };
     std::unordered_map<std::int32_t, Semaphore> semaphores_;

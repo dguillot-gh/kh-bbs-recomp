@@ -44,6 +44,8 @@ void ThreadManager::initialize(psprecomp::Runtime &runtime,
     next_ready_sequence_ = 1u;
     threads_.clear();
     ready_.clear();
+    delayed_.clear();
+    switches_ = 0u;
     end_waiters_.clear();
     semaphores_.clear();
     message_pipes_.clear();
@@ -242,8 +244,10 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
         });
     runtime.register_hle("ThreadManForUser", 0x912354A7u,
         [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
-            const std::uint32_t priority = ctx.gpr[4u];
             const auto current = threads_.find(current_uid_);
+            // Priority 0 means "the caller's own priority".
+            const std::uint32_t priority = ctx.gpr[4u] != 0u || current == threads_.end()
+                ? ctx.gpr[4u] : current->second.priority;
             if (current == threads_.end() || current->second.priority != priority) {
                 set_success(ctx);
                 return;
@@ -253,7 +257,12 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
                 return found != threads_.end() && found->second.state == State::Ready &&
                     found->second.priority == priority;
             });
-            if (!peer_ready) { set_success(ctx); return; }
+            if (!peer_ready) {
+                // A spin-wait on rotate: let time pass so delayed threads can run.
+                if (!delayed_.empty()) delay_yield(rt, ctx);
+                else set_success(ctx);
+                return;
+            }
             psprecomp::AllegrexContext yielded = ctx;
             yielded.set_gpr(2u, 0u);
             yielded.pc = ctx.gpr[31u];
@@ -295,7 +304,7 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
         current->second.context = suspended;
         if (std::find(waiters.begin(), waiters.end(), uid) == waiters.end()) waiters.push_back(uid);
         if (!activate_next(rt, ctx, reason))
-            rt.stop(std::string("Peace Walker message-pipe deadlock waiting on ") + reason);
+            rt.stop(std::string("BBS message-pipe deadlock waiting on ") + reason);
     };
     runtime.register_hle("ThreadManForUser", 0x7C0DC2A0u,
         [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
@@ -645,86 +654,125 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
         [event_flag_wait](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
             event_flag_wait(rt, ctx, "event-flag-wait-cb");
         });
-    // Delay bring-up: PSP's DelayThread suspends the caller, but this
-    // cooperative scheduler has no host-side timer. If a peer is ready, yield
-    // to it and resume after the import as if the delay completed; with no
-    // peer ready the main loop continues at host speed (no frame pacing).
-    // The delay duration and the CB callback argument are ignored.
-    const auto delay_yield = [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
-        const bool peer_ready = std::any_of(ready_.begin(), ready_.end(), [this](const ReadyItem &item) {
-            const auto found = threads_.find(item.uid);
-            return found != threads_.end() && found->second.state == State::Ready;
-        });
-        if (!peer_ready) { set_success(ctx); return; }
-        psprecomp::AllegrexContext yielded = ctx;
-        yielded.set_gpr(2u, 0u);
-        yielded.pc = ctx.gpr[31u]; // Continue past the import once the peer yields back.
-        enqueue(current_uid_, yielded);
-        // A delaying thread is not ready to run right away, so it loses this
-        // scheduling round to every ready peer, even lower-priority ones: on
-        // PSP a started peer runs while the caller sits in its delay.
-        // (BBS: user_main 19 vs DiscInfoBind 20 — without this, user_main
-        // re-wins every round and DiscInfoBind never runs.)
-        auto self = threads_.find(current_uid_);
-        if (self == threads_.end()) {
-            rt.stop("BBS delay deadlock: delaying thread unknown");
-            return;
-        }
-        const std::uint32_t saved_priority = self->second.priority;
-        self->second.priority = 0xFFFFFFFFu;
-        if (!activate_next(rt, ctx, "delay-yield"))
-            rt.stop("BBS delay deadlock: no thread to run after yield");
-        self->second.priority = saved_priority;
-    };
-    runtime.register_hle("ThreadManForUser", 0xCEADEB47u,   // sceKernelDelayThread
-        [delay_yield](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
-            delay_yield(rt, ctx);
-        });
-    runtime.register_hle("ThreadManForUser", 0x68DA9E36u,   // sceKernelDelayThreadCB
-        [delay_yield](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
-            delay_yield(rt, ctx);
-        });
-    // sceDisplay vblank waits (bring-up): count the frame, hand the CPU to a
-    // ready peer thread (delay_yield), return 0. Real 60 fps pacing and frame
-    // capture land later (S4/S11).
+    // sceKernelDelayThread(CB): the duration and the CB callback argument are
+    // ignored; the caller waits until no other thread is ready (delay_yield).
+    for (const std::uint32_t nid : {0xCEADEB47u, 0x68DA9E36u}) {
+        runtime.register_hle("ThreadManForUser", nid,
+            [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { delay_yield(rt, ctx); });
+    }
+    // sceDisplay vblank waits (bring-up): count the frame and wait like a
+    // DelayThread (delay_yield: other ready threads run first), return 0.
+    // Real 60 fps pacing and frame capture land later (S4/S11).
     for (const std::uint32_t nid : {0x984C27E7u, 0x46F186C3u, 0x36CDFADEu, 0x8EB9EC49u}) {
         runtime.register_hle("sceDisplay", nid,
-            [this, delay_yield](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
                 ++vblank_count;
                 delay_yield(rt, ctx);
             });
     }
-    // BRINGUP: sceKernelSleepThread(CB) — no wakeup sources yet, so sleep
-    // means "yield to a ready peer" (VCS vcs_profile.cpp:5845-5849 suspends
-    // until an interrupt wakes the thread; that path lands with the GE port).
-    // If sceKernelWakeupThread marked this thread, return at once (PW S2b).
+    // sceKernelSleepThread(CB): block until sceKernelWakeupThread (sleep_thread).
+    // The CB variant doesn't run callbacks yet.
     for (const std::uint32_t nid : {0x9ACE131Eu, 0x82826F70u}) {
         runtime.register_hle("ThreadManForUser", nid,
-            [this, delay_yield](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
-                const auto self = threads_.find(current_uid_);
-                if (self != threads_.end() && self->second.wakeup > 0u) {
-                    self->second.wakeup -= 1u;
-                    set_success(ctx);
-                    return;
-                }
-                delay_yield(rt, ctx);
-            });
+            [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { sleep_thread(rt, ctx); });
     }
-    // sceKernelWakeupThread: mark the target thread woken (its next Sleep
-    // returns at once) and, if it already yielded, put it back at the front (PW S2b).
+    // sceKernelWakeupThread: resume a sleeping thread, or count the wakeup for
+    // its next Sleep (wake_thread).
     runtime.register_hle("ThreadManForUser", 0xD59EAD2Fu,
-        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
-            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
-            const auto found = threads_.find(uid);
-            if (found == threads_.end()) { set_error(ctx, 0x80020198u); return; } // INVALID_THREAD
-            found->second.wakeup += 1u; // The thread's next Sleep returns at once.
-            if (found->second.state == State::Ready) { // Already yielded: bump to front.
-                const auto existing = std::find_if(ready_.begin(), ready_.end(),
-                    [uid](const ReadyItem &item) { return item.uid == uid; });
-                if (existing != ready_.end()) existing->sequence = next_ready_sequence_++;
-            }
-            set_success(ctx);
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            wake_thread(rt, static_cast<std::int32_t>(ctx.gpr[4u]), ctx);
         });
+}
+
+void ThreadManager::delay_yield(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) {
+    set_success(ctx);
+    // Nothing else could run: the delay just passes.
+    if (ready_.empty() && delayed_.empty()) return;
+    const auto self = threads_.find(current_uid_);
+    if (self == threads_.end()) {
+        runtime.stop("BBS delay: delaying thread unknown");
+        return;
+    }
+    // Park until the CPU is idle, so every ready peer runs first, even a
+    // lower-priority one (user_main 19 vs DiscInfoBind 20, 10/27). A plain
+    // yield put the thread straight back in ready_, and two delaying threads
+    // then took turns forever above a lower-priority one (PW S2b, review 10/28).
+    self->second.context = ctx;
+    self->second.context.pc = ctx.gpr[31u]; // Resume past the import.
+    self->second.state = State::Delayed;
+    self->second.delay_due = switches_ + kDelaySwitches;
+    delayed_.push_back(current_uid_);
+    if (!activate_next(runtime, ctx, "delay")) {
+        dump_threads("no thread to run after a delay");
+        runtime.stop("BBS deadlock: no thread to run after a delay");
+    }
+}
+
+void ThreadManager::dump_threads(const char *why) const {
+    const auto state_name = [](State state) {
+        switch (state) {
+        case State::Created: return "created";
+        case State::Ready: return "ready";
+        case State::Running: return "running";
+        case State::Sleeping: return "waiting (sema/pipe/flag/thread-end)";
+        case State::Asleep: return "asleep (SleepThread, needs WakeupThread)";
+        case State::Delayed: return "delayed";
+        case State::Completed: return "completed";
+        }
+        return "?";
+    };
+    std::cerr << "[pw-thread] thread states (" << why << "):\n";
+    for (const auto &[uid, thread] : threads_)
+        std::cerr << "[pw-thread]   uid=" << uid << " name=" << thread.name
+                  << " prio=" << thread.priority << " state=" << state_name(thread.state)
+                  << " pc=" << psprecomp::hex32(thread.context.pc) << "\n";
+}
+
+void ThreadManager::sleep_thread(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) {
+    set_success(ctx);
+    const auto self = threads_.find(current_uid_);
+    if (self == threads_.end()) {
+        runtime.stop("BBS sleep: sleeping thread unknown");
+        return;
+    }
+    if (self->second.wakeup > 0u) { // A WakeupThread came first: don't sleep.
+        self->second.wakeup -= 1u;
+        return;
+    }
+    self->second.context = ctx;
+    self->second.context.pc = ctx.gpr[31u]; // WakeupThread resumes us past the import.
+    self->second.state = State::Asleep;
+    // Nothing emulated wakes a sleeper yet (no interrupts or GE callbacks run):
+    // only the game's own WakeupThread calls do. Log it, so a thread that
+    // never comes back is easy to find.
+    if (thread_diag_enabled())
+        std::cerr << "[pw-thread] asleep uid=" << current_uid_ << " name=" << self->second.name
+                  << " ra=" << psprecomp::hex32(ctx.gpr[31u]) << "\n";
+    if (!activate_next(runtime, ctx, "sleep")) {
+        dump_threads("every thread waits");
+        runtime.stop("BBS deadlock: every thread waits (SleepThread with no other thread to run)");
+    }
+}
+
+void ThreadManager::wake_thread(psprecomp::Runtime &runtime, std::int32_t uid,
+                                psprecomp::AllegrexContext &ctx) {
+    const auto found = threads_.find(uid);
+    if (found == threads_.end()) { set_error(ctx, 0x80020198u); return; } // INVALID_THREAD
+    set_success(ctx);
+    if (found->second.state != State::Asleep) {
+        found->second.wakeup += 1u; // Its next Sleep returns at once.
+        return;
+    }
+    enqueue(uid, found->second.context);
+    // A woken thread that outranks the caller runs now (like StartThread).
+    const auto caller = threads_.find(current_uid_);
+    if (caller != threads_.end() && uid != current_uid_ &&
+        found->second.priority < caller->second.priority) {
+        psprecomp::AllegrexContext caller_context = ctx;
+        caller_context.pc = ctx.gpr[31u];
+        enqueue(current_uid_, caller_context);
+        (void)activate_next(runtime, ctx, "wakeup");
+    }
 }
 
 void ThreadManager::thread_return_trampoline(psprecomp::Runtime &runtime,
@@ -804,6 +852,39 @@ bool ThreadManager::activate_next(psprecomp::Runtime &runtime,
         const auto found = threads_.find(item.uid);
         return found == threads_.end() || found->second.state != State::Ready;
     }), ready_.end());
+    ++switches_;
+    // Delays also end while other threads keep handing work to each other
+    // (pipes, semas: ready_ never empties), after kDelaySwitches switches.
+    if (!delayed_.empty()) {
+        std::vector<std::int32_t> waiting;
+        for (const std::int32_t uid : delayed_) {
+            const auto found = threads_.find(uid);
+            if (found == threads_.end() || found->second.state != State::Delayed) continue;
+            if (found->second.delay_due <= switches_) enqueue(uid, found->second.context);
+            else waiting.push_back(uid);
+        }
+        delayed_ = std::move(waiting);
+    }
+    if (ready_.empty() && !delayed_.empty()) {
+        // Nothing can run, so time passes: the delayed threads' waits are over.
+        // The thread that delayed last (the back) waits one more round when
+        // others delayed before it, so two delaying threads alternate instead
+        // of the higher-priority one winning every time.
+        std::vector<std::int32_t> keep;
+        if (delayed_.size() > 1u) keep.push_back(delayed_.back());
+        for (std::size_t i = 0; i < delayed_.size() - keep.size(); ++i) {
+            const auto found = threads_.find(delayed_[i]);
+            if (found != threads_.end() && found->second.state == State::Delayed)
+                enqueue(delayed_[i], found->second.context);
+        }
+        delayed_ = std::move(keep);
+        if (ready_.empty() && !delayed_.empty()) { // Every earlier one was gone.
+            const auto found = threads_.find(delayed_.front());
+            if (found != threads_.end() && found->second.state == State::Delayed)
+                enqueue(delayed_.front(), found->second.context);
+            delayed_.clear();
+        }
+    }
     if (ready_.empty()) return false;
 
     const auto selected = std::min_element(ready_.begin(), ready_.end(), [this](const auto &a, const auto &b) {
@@ -838,6 +919,7 @@ void ThreadManager::start_thread(psprecomp::Runtime &runtime,
         set_error(ctx, 0x800201A4u);
         return;
     }
+    thread.wakeup = 0u; // A WakeupThread before the start doesn't count.
 
     const std::uint32_t argument_size = ctx.gpr[5u];
     const std::uint32_t argument_ptr = ctx.gpr[6u];
@@ -902,6 +984,15 @@ void ThreadManager::on_thread_return(psprecomp::Runtime &runtime,
     wake_thread_end_waiters(finished_uid);
     if (!activate_next(runtime, ctx, "thread-return")) {
         set_success(ctx);
+        const bool all_done = std::all_of(threads_.begin(), threads_.end(),
+            [](const auto &entry) {
+                return entry.second.state == State::Completed || entry.second.state == State::Created;
+            });
+        if (!all_done) {
+            dump_threads("thread returned, nothing left to run");
+            runtime.stop("BBS deadlock: a thread returned and every other thread waits");
+            return;
+        }
         runtime.stop("All PSP threads completed");
     }
 }
@@ -935,7 +1026,7 @@ void ThreadManager::wait_thread_end(psprecomp::Runtime &runtime,
         current->second.context = waiter;
     }
     if (!activate_next(runtime, ctx, "wait-thread-end"))
-        runtime.stop("Peace Walker thread wait deadlock on uid " + std::to_string(target_uid));
+        runtime.stop("BBS thread wait deadlock on uid " + std::to_string(target_uid));
 }
 
 void ThreadManager::delete_thread(psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
