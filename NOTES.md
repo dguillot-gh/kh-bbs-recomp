@@ -39,6 +39,10 @@ What went wrong in our host:
   `[io-read] raw` lines for BBS0..4, then a `[watch-write]` setting `0x09A7A668` to 1, and the
   main thread leaving its wait loop.
 
+## Session 2026-10-27 (home PC, evening)
+
+- step 1: done — build OK, no host compile fixes needed (20261027-192621-build.log).
+
 ## Current state (2026-10-27, home PC): DiscInfoBind runs its UMD probe but never sets the done-flag
 
 - **Step 2 done (2026-10-27, home PC).** Two fixes landed this session: (1) `delay_yield` in
