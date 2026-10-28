@@ -76,24 +76,31 @@ What went wrong in our host:
     what 0x62 means.
   - Per session rule (BUDGET USED → record, stop): **BBS loop ended here.**
 
-## Current state (2026-10-27, home PC): DiscInfoBind runs its UMD probe but never sets the done-flag
+## Current state (2026-10-27, home PC): BBS0+BBS1 complete; guest exits the thread — parked on BUDGET USED
 
-- **Step 2 done (2026-10-27, home PC).** Two fixes landed this session: (1) `delay_yield` in
-  `thread_manager.cpp` — the delaying thread now loses the scheduling round to any ready peer, so
-  DiscInfoBind actually gets scheduled and runs (it previously never ran); (2) `DiscIo::open` in
-  `disc_io.cpp` — a bare-drive / pseudo-path probe (e.g. "umd1:") maps to a host directory that
-  `std::fstream::open` rejects on Windows, so return a valid synthetic fd instead of an error
-  (VCS does the same for empty-device probes). This resolved the `0x08810E04` umd1: open retry
-  loop (1 open now, was 32).
-- **New stop (exit 0, BUDGET USED):** `Dispatch limit reached at 0x0880F6F8` (cap 300000).
+- **BBS0 + BBS1 now complete (2026-10-27, home PC).** BBS0: getstat `lbn=58032` → raw-ISO
+  `sceIoOpen("umd1:")` fd=3 → 64-bit seek 58032 → `[io-read] raw units=112` ✓. BBS1: getstat
+  (`lbn=394144`) → open fd=4 → `sceIoIoctl` (devctl) → `sceUmdGetDriveStat` → lwmutex →
+  18-byte async read of the header into `0x09FB8600` → **then the guest itself calls
+  `psp_thread_return a0=0x62`** (its own C++ error handler; it recorded an error at
+  `0x09A7A66C` = flag+4). BBS2–4 never reached; flag `0x09A7A668` never set.
+- Fixes landed this session: (1) `delay_yield` in `thread_manager.cpp` — the delaying thread
+  now loses the scheduling round to any ready peer, so DiscInfoBind actually runs; (2)
+  `DiscIo::open` — bare-drive / pseudo-path probes (e.g. "umd1:") get a valid synthetic fd
+  (VCS does the same); (3) lenient `sceIoIoctl` (0x63632449) success handler (cmd 0x04100001
+  semantics unknown; outdata untouched, returns 0).
+- **Stop (exit 0, BUDGET USED, parked):** `Dispatch limit reached at 0x0880F6F8` (cap 300000).
   DiscInfoBind (uid=2) now runs its full visible job — `sceIoGetstat`, `sceUmdGetDriveStat(1)`,
   lock, `sceIoOpen("umd1:")` (succeeds), unlock — then **returns** without ever writing the
   done-flag at `0x09A7A668`. user_main (uid=1) polls that flag in a 33 ms `DelayThreadCB` loop at
   `0x0880F6F8` and spins to the cap. Trace: `logs\bbs\20261027-182557-run.log` (lines 116-132).
-- **Next lead (fresh session):** why does DiscInfoBind exit after the umd1: probe without setting
-  `0x09A7A668`? Read the DiscInfoBind entry `0x0880F750` and the umd-check function
-  `0x08810D94`-`0x08810E04` in `generated_unit_0001.cpp`; re-run the Step 1 trace with
-  `PSPRECOMP_WATCH_WRITE=0x09A7A668` to confirm nothing writes the flag.
+- **Next lead (fresh session):** DiscInfoBind exits via its own C++ error handler right after
+  the 18-byte BBS1 header read (it wrote an error at `0x09A7A66C`). Leads (from the session
+  record above): (a) our lenient `sceIoIoctl` writes nothing to outdata — the guest may expect
+  a word there; (b) the 18-byte header into `0x09FB8600` is parsed by the virtual call — verify
+  the first 18 bytes of `disc-files\PSP_GAME\USRDIR\BBS1.DAT` (magic/version) against what the
+  guest expects; (c) `psp_thread_return a0=0x62` — check `L_0880F750`'s epilogue for what 0x62
+  means. Re-run with `PSPRECOMP_WATCH_WRITE=0x09A7A66C` (+`SIZE=1`) to watch the error write.
 - (Earlier, work-PC review) the run exited 0 at the dispatch cap:
   `Dispatch limit reached at 0x0880F6F8` (cap 300000). No missing HLE, no unlifted code.
 - **It is not the main loop.** `generated_unit_0001.cpp` ~8020-8090, function around
