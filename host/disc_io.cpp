@@ -85,6 +85,8 @@ void DiscIo::install_hles(psprecomp::Runtime &runtime) {
         [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { mkdir(rt, ctx); });
     runtime.register_hle("IoFileMgrForUser", 0xACE946E8u,
         [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { getstat(rt, ctx); });
+    runtime.register_hle("IoFileMgrForUser", 0x63632449u,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { ioctl(rt, ctx); });
     runtime.register_hle("ModuleMgrForUser", 0xB7F46618u,
         [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { load_module_by_id(ctx); });
     runtime.register_hle("ModuleMgrForUser", 0x50F0C1ECu,
@@ -199,6 +201,7 @@ void DiscIo::open(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) 
         if (truncate) mode |= std::ios::trunc;
         if (append) mode |= std::ios::app;
         OpenFile file{};
+        file.native = native;
         file.stream.open(native, mode);
         if (!file.stream) { ctx.set_gpr(2u, create ? kIoErrorNoSpace : kIoErrorNotFound); return; }
         file.readable = read_access;
@@ -527,6 +530,60 @@ std::optional<DiscIo::IsoEntry> DiscIo::iso_lookup(const std::string &path) {
     }
     iso_cache_.emplace(key, current);
     return current;
+}
+
+
+void DiscIo::ioctl(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) {
+    const auto fd = static_cast<std::int32_t>(ctx.gpr[4u]);
+    const std::uint32_t command = ctx.gpr[5u];
+    const bool trace = std::getenv("PSPRECOMP_IO_TRACE") != nullptr;
+    const auto found = files_.find(fd);
+    if (found == files_.end()) { ctx.set_gpr(2u, kIoErrorBadDescriptor); return; }
+    OpenFile &file = found->second;
+    if (command != 0x04100001u) {
+        // Other commands are not needed yet: acknowledge, leave outdata alone.
+        if (trace) std::cerr << "[io-ioctl] fd=" << fd << " cmd=0x" << std::hex << command << std::dec << " ret=0 (ignored)\n";
+        ctx.set_gpr(2u, 0u);
+        return;
+    }
+    // 0x04100001: define the PGD (amctrl DRM) key for this file; reads from now
+    // on return the decrypted data, starting at its offset 0. Plain files have
+    // no "\0PGD" header and are left as they are.
+    char magic[4]{};
+    if (file.raw == Raw::None && file.stream.is_open()) {
+        file.stream.clear();
+        file.stream.seekg(0, std::ios::beg);
+        file.stream.read(magic, 4);
+        file.stream.clear();
+        file.stream.seekg(0, std::ios::beg);
+    }
+    if (std::memcmp(magic, "\0PGD", 4) != 0) {
+        if (trace) std::cerr << "[io-ioctl] fd=" << fd << " pgd-key: not a PGD file, ret=0\n";
+        ctx.set_gpr(2u, 0u);
+        return;
+    }
+    const std::filesystem::path plain = decrypted_dir_ / file.native.filename();
+    std::error_code error;
+    if (decrypted_dir_.empty() || !std::filesystem::is_regular_file(plain, error)) {
+        std::string key_hex;
+        static const char *digits = "0123456789abcdef";
+        for (std::uint32_t i = 0; i < 16u && runtime.memory().contains(ctx.gpr[6u] + i, 1u); ++i) {
+            const auto byte = runtime.memory().load8(ctx.gpr[6u] + i);
+            key_hex += digits[byte >> 4u];
+            key_hex += digits[byte & 15u];
+        }
+        runtime.stop("PGD file " + file.native.filename().string() + " needs an offline-decrypted copy at " +
+                     plain.string() + ". Run: pgddec \"" + file.native.string() + "\" \"" + plain.string() +
+                     "\" " + key_hex);
+        return;
+    }
+    file.stream.close();
+    file.stream.open(plain, std::ios::binary | std::ios::in);
+    if (!file.stream) { ctx.set_gpr(2u, kIoErrorNotFound); return; }
+    file.native = plain;
+    file.writable = false;
+    if (trace) std::cerr << "[io-ioctl] fd=" << fd << " pgd-key: now reading " << plain.string() << "\n";
+    ctx.set_gpr(2u, 0u);
 }
 
 } // namespace bbs

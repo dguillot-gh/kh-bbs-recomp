@@ -7,6 +7,39 @@ Build and run from the workspace root: `.\psp.ps1 -Game bbs -Stage regen|build|r
 Inputs (local only): `extracted\KingdomHeartsBirthBySleep\` (`decrypted\EBOOT.BIN.dec`,
 `disc-files\`, corpus `generated-psprecomp-fixed32k\`, or `generated-v2\` after a regen).
 
+## Review 2026-10-28 (work PC): BBS1-3.DAT are PGD-encrypted; fix written (not built)
+
+- `head -c 16` of the archives: **BBS1/2/3.DAT start with `00 50 47 44` = `\0PGD`** (amctrl DRM).
+  BBS0.DAT (`bbsa...`) and BBS4.DAT (`bbs4.dat`) are plain, which is why BBS0 went through.
+- `sceIoIoctl(fd, 0x04100001, key, 16)` is "define the PGD key for this file". After it, reads
+  return **decrypted** data starting at plaintext offset 0. Our lenient handler did nothing, so the
+  18-byte header read got ciphertext, the parser's virtual call failed, and the error flag at
+  `0x09A7A66C` aborted the loader.
+- **Key** (the game's own, `indata` = EBOOT `0x08B313D8`): `77b9de64cd1fc39279d190564728a378`.
+  The same key is used for every PGD archive. The 16 bytes after it may be another key for
+  something else; ignore it unless a run asks for it.
+- **Fix:**
+  - **Offline tool:** psp-native-runtime `tools\pspdec\pgddec.cpp` (`0409746`) decrypts a PGD file
+    with libkirk, the same local-only GPL arrangement as pspdec.
+  - **Host** (`host\disc_io.cpp` `DiscIo::ioctl`): on 0x04100001 for a file starting with `\0PGD`,
+    the fd switches to `extracted\KingdomHeartsBirthBySleep\decrypted\<same name>`, at position 0.
+    If the copy is missing, the run **stops with the exact `pgddec` command to run**. Other ioctl
+    commands still return 0. The lenient lambda in `main.cpp` is gone.
+- **Hints for the run after this:**
+  - Expect `[io-ioctl] fd=N pgd-key: now reading ...BBS1.DAT`, then reads on that fd, then the
+    same for BBS2/BBS3, then raw BBS4 (plain, like BBS0), then the flag `0x09A7A668` set to 1.
+  - If the 18-byte header still fails: `Format-Hex` the first 32 bytes of the decrypted BBS1.DAT.
+    BBS0's plaintext starts `bbsa`, so a sane header likely has a similar ASCII tag. Random bytes
+    mean the decryption is wrong (wrong flag, or a block offset off by the 0x90 header).
+  - The game may getstat the PGD file and size reads from `st_size`. That's the **encrypted** size
+    (header + data + MAC table). If a read comes up short or a size check fails, report the
+    decrypted size there (pgddec prints `data_size`). A one-line change in `getstat` for files
+    with a decrypted copy.
+  - After the flag is set, user_main leaves its wait loop at `0x0880F6F8`. Likely next stops:
+    display (`sceDisplaySetMode`/`SetFrameBuf`), GE (`sceGeEdramGetAddr`, `sceGeListEnQueue`),
+    ctrl and audio init. PW hit exactly these on 10/27 and has handlers for the first ones:
+    `.\psp.ps1 hle <NID>` shows where.
+
 ## Review 2026-10-27 (work PC, evening): why DiscInfoBind quits, and the fix (not built)
 
 DiscInfoBind (`L_0880F750`, `generated_unit_0001.cpp`) loads `BBS%d.DAT` for d = 0..4 and sets the

@@ -19,6 +19,8 @@ public:
     // starting sector (LBN) that sceIoGetstat reports in st_private[0]. BBS
     // finds BBS0-4.DAT that way. Without an ISO those reads have nothing behind them.
     void set_iso(const std::filesystem::path &path);
+    // Folder with offline-decrypted copies of PGD files, same file names.
+    void set_decrypted_dir(const std::filesystem::path &path) { decrypted_dir_ = path; }
 
 private:
     // Raw = none: a host file. Block: the whole disc, seek/read counted in
@@ -26,6 +28,7 @@ private:
     enum class Raw { None, Block, Range };
     struct OpenFile {
         std::fstream stream;
+        std::filesystem::path native; // host files only
         bool readable{};
         bool writable{};
         Raw raw{Raw::None};
@@ -49,6 +52,8 @@ private:
     std::int64_t seek_to(std::int32_t fd, std::int64_t offset, std::uint32_t whence);
     void mkdir(psprecomp::Runtime &, psprecomp::AllegrexContext &);
     void getstat(psprecomp::Runtime &, psprecomp::AllegrexContext &);
+    // sceIoIoctl(fd, cmd, indata, inlen, outdata in t0, outlen in t1).
+    void ioctl(psprecomp::Runtime &, psprecomp::AllegrexContext &);
     void load_module_by_id(psprecomp::AllegrexContext &);
     void start_module(psprecomp::Runtime &, psprecomp::AllegrexContext &);
     void unload_module(psprecomp::AllegrexContext &);
@@ -71,6 +76,7 @@ private:
     std::uint64_t iso_bytes_{};
     std::optional<IsoEntry> iso_root_;
     std::map<std::string, IsoEntry> iso_cache_;
+    std::filesystem::path decrypted_dir_;
 };
 
 } // namespace bbs

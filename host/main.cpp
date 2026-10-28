@@ -324,15 +324,6 @@ int main(int argc, char **argv) {
                 }
                 ctx.set_gpr(2u, 0u);
             });
-        runtime.register_hle("IoFileMgrForUser", 0x63632449u,
-            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
-                // sceIoIoctl(fd, cmd, indata, inlen, outdata, outlen): fd in a0 (unlike
-                // sceIoDevctl's device name), outdata in t0 (arg 5). BBS's loader issues
-                // cmd 0x04100001 after a single-sector read of each BBS*.DAT; the semantics
-                // are unknown, so acknowledge with success like the generic devctl path and
-                // leave any output buffer untouched.
-                ctx.set_gpr(2u, 0u);
-            });
         const auto relocations = elf.load_and_relocate(
             runtime.memory(), psprecomp::kDefaultPspUserLoadBase);
         const auto module = elf.find_module_info(
@@ -499,6 +490,9 @@ int main(int argc, char **argv) {
             }
             if (iso.empty()) std::cerr << "ISO:        none found; raw umd0:/umd1: reads will fail\n";
             else disc_io.set_iso(iso);
+            // PGD-encrypted data (BBS1-3.DAT) is read from copies that
+            // psp-native-runtime\tools\pspdec\pgddec decrypted offline.
+            disc_io.set_decrypted_dir(disc_root.parent_path() / "decrypted");
         }
         partition_memory.initialize(runtime, static_cast<std::uint32_t>(arena_start));
         partition_memory.set_stack_floor_source([&threads] { return threads.stack_floor(); });
