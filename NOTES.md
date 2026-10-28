@@ -48,6 +48,33 @@ What went wrong in our host:
   (sceIoIoctl/sceIoDevctl; args fd=4, cmd=0x04100001, indata=0x08B313D8, inlen=0x10) → **exit 3, not
   registered in any host**. 10 lines before: async read of 112 sectors on fd=3 + waitasync OK, then
   getstat/open of BBS1. No watch-write of 0x09A7A668 yet (log 20261027-192743-run.log).
+- step 3: **cycle 1 done, BBS parked per BUDGET-USED rule.**
+  - Fixed the step-2 stop: `IoFileMgrForUser::0x63632449` = **sceIoIoctl** (fd in a0, unlike
+    sceIoDevctl's device name; outdata = arg 5 in t0). Added NID to both shared tables
+    (psp-native-runtime `nids.csv` + `nid_registry.cpp`) and a lenient success handler in
+    `host\main.cpp` (cmd 0x04100001 semantics unknown; leaves outdata untouched, returns 0).
+  - Re-run (20261027-195442-run.log): **exit 0, `Dispatch limit reached at 0x0880F6F8` — BUDGET
+    USED.** Wait target: user_main (uid=1) polling byte `0x09A7A668` in its 33 ms DelayThreadCB
+    loop; never written by anything.
+  - What DiscInfoBind now does (log lines 153-180): BBS0 full raw-ISO path ✓ (getstat lbn=58032,
+    open fd=3, `[io-read] raw units=112`). BBS1: getstat (lbn=394144), open fd=4, devctl OK,
+    `sceUmdUser::0x6B4A146C` (GetDriveStat), lwmutex lock `0x09A7A6C4`,
+    `IoFileMgrForUser::0xA0B5A7C2` = sceIoReadAsync(fd=4, buf=0x09FB8600, **18 bytes**)
+    `[io-async] fd=4 result=0x12`, WaitAsyncCB ret=0, unlock — then **the guest itself exits the
+    thread** (`psp_thread_return a0=0x62`). BBS2–4 never reached; flag never set.
+  - Lifted code (generated_unit_0001.cpp:10652-10698): after the wait, a virtual call
+    (vtable-style dispatch table: `{int16 id, func}` at *(obj)+24) returns; if negative, the
+    failure path checks the byte at **`0x09A7A66C`** (flag+4: `0x09A80000-22908`) — if nonzero it
+    proceeds toward thread exit; if zero it loops back (`L_08810F9C`) to the next DAT. Same byte is
+    checked at the next function's entry (10782). So the guest recorded an error at 0x09A7A66C
+    (its own C++ error handler) and aborted.
+  - Leads for a fresh session (not chased this session): (a) our sceIoIoctl 0x04100001 handler
+    writes nothing to outdata (t0) — the guest may expect a word there; (b) the 18-byte header
+    read into 0x09FB8600 is parsed by the virtual call — verify the first 18 bytes of
+    `disc-files\PSP_GAME\USRDIR\BBS1.DAT` against what the guest expects (magic/version);
+    (c) `psp_thread_return a0=0x62` — the thread's own exit code, check L_0880F750's epilogue for
+    what 0x62 means.
+  - Per session rule (BUDGET USED → record, stop): **BBS loop ended here.**
 
 ## Current state (2026-10-27, home PC): DiscInfoBind runs its UMD probe but never sets the done-flag
 
