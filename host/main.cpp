@@ -5,6 +5,7 @@
 #include "thread_manager.hpp"
 #include "disc_io.hpp"
 #include "display_state.hpp"
+#include "ge_display.hpp"
 
 #include <cstdint>
 #include <algorithm>
@@ -95,13 +96,11 @@ int main(int argc, char **argv) {
         std::unordered_map<std::int32_t, std::pair<std::uint32_t, std::uint32_t>> callbacks;
         std::uint32_t exit_callback_uid = 0u;
         std::unordered_set<std::int32_t> umd_callbacks;
-        std::int32_t ge_next_callback_uid = 0xA00;
         bool umd_activated = false;
         std::uint32_t impose_language = 1u;
         std::uint32_t impose_button = 0u;
         std::uint32_t controller_sampling_mode = 0u;
         std::uint32_t controller_sampling_cycle = 0u;
-        std::uint32_t ge_next_list_id = 1u;
         std::uint32_t general_purpose_io = 0u;
         runtime.register_hle("SysMemUserForUser", 0x91DE343Cu,
             [&compiled_sdk_version](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
@@ -217,61 +216,13 @@ int main(int argc, char **argv) {
             });
         runtime.register_hle("sceUmdUser", 0x6AF9B50Au,
             [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
-        // sceGeEdramGetAddr(): return the guest physical address where the runtime
-        // maps EDRAM (kVramPhysicalBase), matching the VCS profile.
-        runtime.register_hle("sceGe_user", 0xE47E40E4u,
-            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
-                ctx.set_gpr(2u, psprecomp::GuestMemory::kVramPhysicalBase);
-            });
-        // sceGeSetCallback(struct *cb): registers a GE completion callback.
-        // Bringup has no GE execution, so validate the struct (VCS profile
-        // does the same) and hand out an id without ever firing the callback.
-        runtime.register_hle("sceGe_user", 0xA4FC06A4u,
-            [&ge_next_callback_uid](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
-                const std::uint32_t callback_data = ctx.gpr[4u];
-                if (callback_data == 0u || !rt.memory().contains(callback_data, 16u)) {
-                    ctx.set_gpr(2u, 0x800200D3u); // SCE_KERNEL_ERROR_ILLEGAL_ADDR
-                    return;
-                }
-                ctx.set_gpr(2u, static_cast<std::uint32_t>(ge_next_callback_uid++));
-            });
-        // BRINGUP SHIM: no GE execution; replace with the VCS GE port (S7/S8).
-        // Enqueue/EnQueueHead hand out a list id and raise any SIGNAL event flag
-        // in the list (Sony's GE init waits on the "SceGuSignal" flag).
-        auto ge_shim_enqueue = [&ge_next_list_id](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
-            const std::uint32_t list = ctx.gpr[4u];
-            if (list != 0u && rt.memory().contains(list, 4u)) {
-                for (std::uint32_t offset = 0u; offset < 16384u; offset += 4u) {
-                    const std::uint32_t address = list + offset;
-                    if (!rt.memory().contains(address, 4u)) break;
-                    const std::uint32_t word = rt.memory().load32(address);
-                    const std::uint32_t cmd = word >> 24u;
-                    if (cmd == 0x0Fu || cmd == 0x0Cu) break; // FINISH / END
-                    if (cmd != 0x0Eu) continue;              // SIGNAL: raise the flag
-                    psprecomp::AllegrexContext flag_ctx{};
-                    flag_ctx.gpr[4u] = word & 0xFFFFFFu;     // event-flag uid
-                    flag_ctx.gpr[5u] = 1u;                    // pattern |= mask
-                    rt.invoke_import("ThreadManForUser", 0x1FB15A32u, flag_ctx);
-                }
-            }
-            ctx.set_gpr(2u, ge_next_list_id++);
-        };
-        runtime.register_hle("sceGe_user", 0xAB49E76Au,   // sceGeListEnQueue
-            [ge_shim_enqueue](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { ge_shim_enqueue(rt, ctx); });
-        runtime.register_hle("sceGe_user", 0x1C0D95A6u,   // sceGeListEnQueueHead
-            [ge_shim_enqueue](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { ge_shim_enqueue(rt, ctx); });
-        runtime.register_hle("sceGe_user", 0xE0D68148u,   // sceGeListUpdateStallAddr
-            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
-        runtime.register_hle("sceGe_user", 0x03444EB4u,   // sceGeListSync: COMPLETED
-            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
-        runtime.register_hle("sceGe_user", 0xB287BD61u,   // sceGeDrawSync
-            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
-        runtime.register_hle("sceGe_user", 0xB448EC0Du,
-            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
-        runtime.register_hle("sceGe_user", 0x4C06E472u,
-            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
-        runtime.register_hle("sceGe_user", 0x05DB22CEu,
-            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
+        // GE: the real display-list path (S7), shared with the other game:
+        // psp-native-runtime/host-shared/ge_display.cpp. Lists run inside
+        // sceGeListEnQueue through the VCS software rasterizer into VRAM, and
+        // the game's GE signal/finish callbacks run as guest code (0x4
+        // trampoline). Replaces the 10/28 BRINGUP SHIM. PSPRECOMP_GE_DIAG=1 logs it.
+        psphost::install_ge_display(runtime, psphost::GeDisplayOptions{
+            [&compiled_sdk_version] { return compiled_sdk_version; }});
         runtime.register_hle("sceUtility", 0xA5DA2406u,
             [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
                 // PSP SystemParam integer IDs: defaults for a US/English system.

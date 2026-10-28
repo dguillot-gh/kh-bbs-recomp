@@ -66,6 +66,8 @@ foreach(name framebuffer_capture ge_renderer ge_gpu_backend_dx12 vcs_config
         vcs_draw_distance_patch vcs_runtime_log)
     list(APPEND PSP_VCS_RENDERER_SOURCES "${PSP_VCS_HOST_DIR}/${name}.cpp")
 endforeach()
+# GE HLEs shared by the game hosts (display lists -> the renderer above).
+list(APPEND PSP_VCS_RENDERER_SOURCES "${PSPRECOMP_RUNTIME_DIR}/host-shared/ge_display.cpp")
 
 add_executable(BBSBringup
     host/main.cpp
@@ -81,18 +83,22 @@ if(WIN32)
 endif()
 target_include_directories(BBSBringup PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/host" "${BBS_GENERATED_DIR}"
-    "${PSPRECOMP_RUNTIME_DIR}/profiles/vcs/host")
+    "${PSPRECOMP_RUNTIME_DIR}/profiles/vcs/host" "${PSPRECOMP_RUNTIME_DIR}/host-shared")
 
-# Host-side scheduler/frame-dump test: the real host/thread_manager.cpp with
+# Host-side scheduler/frame-dump/GE test: the real host/thread_manager.cpp with
 # fake guest threads, no game code. Not part of the normal build.
 # Run: .\psp.ps1 test -Game <game>   (psp-native-runtime\bringup\tests\scheduler_test.cpp)
 add_executable(SchedulerTest EXCLUDE_FROM_ALL
     "${PSPRECOMP_RUNTIME_DIR}/bringup/tests/scheduler_test.cpp"
     host/thread_manager.cpp
-    "${PSPRECOMP_RUNTIME_DIR}/profiles/vcs/host/framebuffer_capture.cpp")
+    ${PSP_VCS_RENDERER_SOURCES})
 target_link_libraries(SchedulerTest PRIVATE psprecomp_core)
+if(WIN32)
+    target_link_libraries(SchedulerTest PRIVATE d3d12 dxgi d3dcompiler dxguid)
+endif()
 target_include_directories(SchedulerTest PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/host" "${PSPRECOMP_RUNTIME_DIR}/profiles/vcs/host")
+    "${CMAKE_CURRENT_SOURCE_DIR}/host" "${PSPRECOMP_RUNTIME_DIR}/profiles/vcs/host"
+    "${PSPRECOMP_RUNTIME_DIR}/host-shared")
 target_compile_definitions(SchedulerTest PRIVATE GAME_NS=bbs)
 
 # Bring-up builds need fast feedback and manageable compiler memory. Raise the
