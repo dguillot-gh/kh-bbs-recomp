@@ -31,6 +31,7 @@ private:
         State state{State::Created};
         std::uint64_t ready_sequence{};
         psprecomp::AllegrexContext context{};
+        std::uint32_t wakeup{0u}; // sceKernelWakeupThread markers (PW S2b).
     };
 
     struct ReadyItem {
@@ -64,7 +65,7 @@ private:
     std::unordered_map<std::int32_t, Thread> threads_;
     std::deque<ReadyItem> ready_;
     std::unordered_map<std::int32_t, std::vector<std::int32_t>> end_waiters_;
-    struct Semaphore { std::int32_t count{}; std::int32_t maximum{}; };
+    struct Semaphore { std::int32_t count{}; std::int32_t maximum{}; std::vector<std::int32_t> waiting; };
     std::unordered_map<std::int32_t, Semaphore> semaphores_;
     struct MessagePipe {
         std::string name;

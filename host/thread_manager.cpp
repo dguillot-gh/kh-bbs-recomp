@@ -1,5 +1,6 @@
 #include "thread_manager.hpp"
 
+#include "display_state.hpp"
 #include "psprecomp/common.hpp"
 
 #include <algorithm>
@@ -134,6 +135,15 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
                 set_error(ctx, 0x800201B0u); return;
             }
             it->second.count += amount;
+            // Wake sleeping waiters in FIFO order, one per posted count (PW S2).
+            while (!it->second.waiting.empty() && it->second.count > 0) {
+                const std::int32_t waiter = it->second.waiting.front();
+                it->second.waiting.erase(it->second.waiting.begin());
+                it->second.count--;
+                const auto found = threads_.find(waiter);
+                if (found != threads_.end() && found->second.state == State::Sleeping)
+                    enqueue(waiter, found->second.context);
+            }
             set_success(ctx);
         });
     runtime.register_hle("ThreadManForUser", 0x4E3A1105u,
@@ -146,6 +156,34 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
             if (it->second.count < amount) { set_error(ctx, 0x800201A8u); return; }
             it->second.count -= amount;
             set_success(ctx);
+        });
+    // BRINGUP: sceKernelWaitSemaCB — take the count, or sleep until Post
+    // resumes us past the import with success (PW S2, VCS vcs_profile.cpp:6022-6040).
+    runtime.register_hle("ThreadManForUser", 0x6D212BACu,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto amount = static_cast<std::int32_t>(ctx.gpr[5u]);
+            const auto it = semaphores_.find(uid);
+            if (it == semaphores_.end()) { set_error(ctx, 0x80020199u); return; }
+            if (amount <= 0 || amount > it->second.maximum) { set_error(ctx, 0x800201B0u); return; }
+            if (it->second.count >= amount) {
+                it->second.count -= amount;
+                set_success(ctx);
+                return;
+            }
+            const std::int32_t self = current_uid_;
+            const auto current = threads_.find(self);
+            if (current == threads_.end()) { rt.stop("BBS semaphore wait without a PSP thread"); return; }
+            psprecomp::AllegrexContext suspended = ctx;
+            suspended.set_gpr(2u, 0u);
+            suspended.pc = ctx.gpr[31u]; // Post resumes us past the import.
+            current->second.state = State::Sleeping;
+            current->second.context = suspended;
+            if (std::find(it->second.waiting.begin(), it->second.waiting.end(), self) == it->second.waiting.end())
+                it->second.waiting.push_back(self);
+            const std::string reason = "semaphore wait " + std::to_string(uid);
+            if (!activate_next(rt, ctx, reason.c_str()))
+                rt.stop("BBS semaphore deadlock waiting on " + std::to_string(uid));
         });
     runtime.register_hle("ThreadManForUser", 0x28B6489Cu,
         [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
@@ -645,6 +683,47 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
     runtime.register_hle("ThreadManForUser", 0x68DA9E36u,   // sceKernelDelayThreadCB
         [delay_yield](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
             delay_yield(rt, ctx);
+        });
+    // sceDisplay vblank waits (bring-up): count the frame, hand the CPU to a
+    // ready peer thread (delay_yield), return 0. Real 60 fps pacing and frame
+    // capture land later (S4/S11).
+    for (const std::uint32_t nid : {0x984C27E7u, 0x46F186C3u, 0x36CDFADEu, 0x8EB9EC49u}) {
+        runtime.register_hle("sceDisplay", nid,
+            [this, &delay_yield](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                ++vblank_count;
+                delay_yield(rt, ctx);
+            });
+    }
+    // BRINGUP: sceKernelSleepThread(CB) — no wakeup sources yet, so sleep
+    // means "yield to a ready peer" (VCS vcs_profile.cpp:5845-5849 suspends
+    // until an interrupt wakes the thread; that path lands with the GE port).
+    // If sceKernelWakeupThread marked this thread, return at once (PW S2b).
+    for (const std::uint32_t nid : {0x9ACE131Eu, 0x82826F70u}) {
+        runtime.register_hle("ThreadManForUser", nid,
+            [this, &delay_yield](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                const auto self = threads_.find(current_uid_);
+                if (self != threads_.end() && self->second.wakeup > 0u) {
+                    self->second.wakeup -= 1u;
+                    set_success(ctx);
+                    return;
+                }
+                delay_yield(rt, ctx);
+            });
+    }
+    // sceKernelWakeupThread: mark the target thread woken (its next Sleep
+    // returns at once) and, if it already yielded, put it back at the front (PW S2b).
+    runtime.register_hle("ThreadManForUser", 0xD59EAD2Fu,
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto found = threads_.find(uid);
+            if (found == threads_.end()) { set_error(ctx, 0x80020198u); return; } // INVALID_THREAD
+            found->second.wakeup += 1u; // The thread's next Sleep returns at once.
+            if (found->second.state == State::Ready) { // Already yielded: bump to front.
+                const auto existing = std::find_if(ready_.begin(), ready_.end(),
+                    [uid](const ReadyItem &item) { return item.uid == uid; });
+                if (existing != ready_.end()) existing->sequence = next_ready_sequence_++;
+            }
+            set_success(ctx);
         });
 }
 

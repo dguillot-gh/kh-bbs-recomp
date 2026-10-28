@@ -4,6 +4,7 @@
 #include "partition_memory.hpp"
 #include "thread_manager.hpp"
 #include "disc_io.hpp"
+#include "display_state.hpp"
 
 #include <cstdint>
 #include <algorithm>
@@ -100,6 +101,8 @@ int main(int argc, char **argv) {
         std::uint32_t impose_button = 0u;
         std::uint32_t controller_sampling_mode = 0u;
         std::uint32_t controller_sampling_cycle = 0u;
+        std::uint32_t ge_next_list_id = 1u;
+        std::uint32_t general_purpose_io = 0u;
         runtime.register_hle("SysMemUserForUser", 0x91DE343Cu,
             [&compiled_sdk_version](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
                 // SDK 5.00-5.50 variant of sceKernelSetCompiledSdkVersion.
@@ -137,6 +140,18 @@ int main(int argc, char **argv) {
                     ctx.set_gpr(2u, 0u);
                 });
         }
+        // VCS vcs_profile.cpp:6380-6388: debug LEDs/switches, harmless.
+        runtime.register_hle("UtilsForUser", 0x37FB5C42u,
+            [&general_purpose_io](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                // sceKernelGetGPI: return the stored value in v0.
+                ctx.set_gpr(2u, general_purpose_io);
+            });
+        runtime.register_hle("UtilsForUser", 0x6AD345D7u,
+            [&general_purpose_io](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                // sceKernelSetGPO: store the value in a0.
+                general_purpose_io = ctx.gpr[4u];
+                ctx.set_gpr(2u, 0u);
+            });
         runtime.register_hle("ThreadManForUser", 0xE81CAF8Fu,
             [&next_callback_uid, &callbacks](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
                 const std::int32_t uid = next_callback_uid++;
@@ -220,6 +235,43 @@ int main(int argc, char **argv) {
                 }
                 ctx.set_gpr(2u, static_cast<std::uint32_t>(ge_next_callback_uid++));
             });
+        // BRINGUP SHIM: no GE execution; replace with the VCS GE port (S7/S8).
+        // Enqueue/EnQueueHead hand out a list id and raise any SIGNAL event flag
+        // in the list (Sony's GE init waits on the "SceGuSignal" flag).
+        auto ge_shim_enqueue = [&ge_next_list_id](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const std::uint32_t list = ctx.gpr[4u];
+            if (list != 0u && rt.memory().contains(list, 4u)) {
+                for (std::uint32_t offset = 0u; offset < 16384u; offset += 4u) {
+                    const std::uint32_t address = list + offset;
+                    if (!rt.memory().contains(address, 4u)) break;
+                    const std::uint32_t word = rt.memory().load32(address);
+                    const std::uint32_t cmd = word >> 24u;
+                    if (cmd == 0x0Fu || cmd == 0x0Cu) break; // FINISH / END
+                    if (cmd != 0x0Eu) continue;              // SIGNAL: raise the flag
+                    psprecomp::AllegrexContext flag_ctx{};
+                    flag_ctx.gpr[4u] = word & 0xFFFFFFu;     // event-flag uid
+                    flag_ctx.gpr[5u] = 1u;                    // pattern |= mask
+                    rt.invoke_import("ThreadManForUser", 0x1FB15A32u, flag_ctx);
+                }
+            }
+            ctx.set_gpr(2u, ge_next_list_id++);
+        };
+        runtime.register_hle("sceGe_user", 0xAB49E76Au,   // sceGeListEnQueue
+            [ge_shim_enqueue](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { ge_shim_enqueue(rt, ctx); });
+        runtime.register_hle("sceGe_user", 0x1C0D95A6u,   // sceGeListEnQueueHead
+            [ge_shim_enqueue](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { ge_shim_enqueue(rt, ctx); });
+        runtime.register_hle("sceGe_user", 0xE0D68148u,   // sceGeListUpdateStallAddr
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
+        runtime.register_hle("sceGe_user", 0x03444EB4u,   // sceGeListSync: COMPLETED
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
+        runtime.register_hle("sceGe_user", 0xB287BD61u,   // sceGeDrawSync
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
+        runtime.register_hle("sceGe_user", 0xB448EC0Du,
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
+        runtime.register_hle("sceGe_user", 0x4C06E472u,
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
+        runtime.register_hle("sceGe_user", 0x05DB22CEu,
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
         runtime.register_hle("sceUtility", 0xA5DA2406u,
             [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
                 // PSP SystemParam integer IDs: defaults for a US/English system.
@@ -318,9 +370,230 @@ int main(int argc, char **argv) {
             [&controller_sampling_cycle](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
                 ctx.set_gpr(2u, controller_sampling_cycle);
             });
+        // sceCtrlReadBuffer*, copied from the VCS profile (vcs_profile.cpp 6449-6482)
+        // with the bring-up constants: no buttons, centered analog sticks.
+        auto write_controller_samples = [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx, bool negative) {
+            const std::uint32_t destination = ctx.gpr[4u];
+            const std::uint32_t count = ctx.gpr[5u];
+            constexpr std::uint32_t sample_size = 16u;
+            if (count == 0u) { ctx.set_gpr(2u, 0u); return; }
+            if (count > 64u || !rt.memory().contains(destination, static_cast<std::size_t>(count) * sample_size)) {
+                ctx.set_gpr(2u, 0x80000103u);
+                return;
+            }
+            const std::uint32_t timestamp = static_cast<std::uint32_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            const std::uint32_t buttons = negative ? ~0u : 0u;
+            for (std::uint32_t index = 0u; index < count; ++index) {
+                const std::uint32_t sample = destination + index * sample_size;
+                rt.memory().store32(sample, timestamp);
+                rt.memory().store32(sample + 4u, buttons);
+                rt.memory().store8(sample + 8u, 128u);
+                rt.memory().store8(sample + 9u, 128u);
+                rt.memory().store8(sample + 10u, 128u);
+                rt.memory().store8(sample + 11u, 128u);
+                rt.memory().zero(sample + 12u, 4u);
+            }
+            ctx.set_gpr(2u, count);
+        };
+        runtime.register_hle("sceCtrl", 0x3A622550u,
+            [write_controller_samples](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { write_controller_samples(rt, ctx, false); });
+        runtime.register_hle("sceCtrl", 0x1F803938u,
+            [write_controller_samples](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { write_controller_samples(rt, ctx, false); });
+        runtime.register_hle("sceCtrl", 0xC152080Au,
+            [write_controller_samples](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { write_controller_samples(rt, ctx, true); });
+        runtime.register_hle("sceCtrl", 0x60B81F86u,
+            [write_controller_samples](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { write_controller_samples(rt, ctx, true); });
         runtime.register_hle("sceDisplay", 0x210EAB3Au,
             [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
                 ctx.set_gpr(2u, 0u);
+            });
+        // Display state + handlers, copied from the VCS profile
+        // (vcs_profile.cpp 1275-1284, 6805-6873). S4 adds frame capture on top.
+        runtime.register_hle("sceDisplay", 0x0E20F177u,   // sceDisplaySetMode
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                const std::uint32_t mode = ctx.gpr[4u];
+                const std::uint32_t width = ctx.gpr[5u];
+                const std::uint32_t height = ctx.gpr[6u];
+                if (mode != 0u || width == 0u || width > 480u || height == 0u || height > 272u) {
+                    ctx.set_gpr(2u, 0x80000107u);
+                    return;
+                }
+                bbs::display_state.mode = mode;
+                bbs::display_state.width = width;
+                bbs::display_state.height = height;
+                if (std::getenv("PSPRECOMP_DISPLAY_DIAG") != nullptr)
+                    std::cerr << "[display] set-mode " << width << "x" << height << "\n";
+                ctx.set_gpr(2u, 0u);
+            });
+        runtime.register_hle("sceDisplay", 0xDEA197D4u,   // sceDisplayGetMode
+            [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                const std::uint32_t mode = ctx.gpr[4u];
+                const std::uint32_t width = ctx.gpr[5u];
+                const std::uint32_t height = ctx.gpr[6u];
+                if ((mode != 0u && !rt.memory().contains(mode, 4u)) ||
+                    (width != 0u && !rt.memory().contains(width, 4u)) ||
+                    (height != 0u && !rt.memory().contains(height, 4u))) {
+                    ctx.set_gpr(2u, 0x800200D3u);
+                    return;
+                }
+                if (mode != 0u) rt.memory().store32(mode, bbs::display_state.mode);
+                if (width != 0u) rt.memory().store32(width, bbs::display_state.width);
+                if (height != 0u) rt.memory().store32(height, bbs::display_state.height);
+                ctx.set_gpr(2u, 0u);
+            });
+        runtime.register_hle("sceDisplay", 0x289D82FEu,   // sceDisplaySetFrameBuf
+            [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                auto &state = bbs::display_state;
+                const std::uint32_t buffer = ctx.gpr[4u];
+                const std::uint32_t stride = ctx.gpr[5u];
+                const std::uint32_t format = ctx.gpr[6u];
+                const std::uint32_t sync = ctx.gpr[7u];
+                if (buffer == 0u || !rt.memory().contains(buffer, 4u) ||
+                    (stride != 0u && (stride < state.width || stride > 2048u)) ||
+                    format > 3u || sync > 1u) {
+                    ctx.set_gpr(2u, 0x80000107u);
+                    return;
+                }
+                state.frame_buffer = buffer;
+                state.buffer_width = stride;
+                state.pixel_format = format;
+                state.sync_mode = sync;
+                if (std::getenv("PSPRECOMP_DISPLAY_DIAG") != nullptr)
+                    std::cerr << "[display] set-framebuf buffer=" << psprecomp::hex32(buffer)
+                              << " stride=" << stride << " format=" << format << "\n";
+                ctx.set_gpr(2u, 0u);
+            });
+        runtime.register_hle("sceDisplay", 0xEEDA2E54u,   // sceDisplayGetFrameBuf
+            [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                const std::uint32_t buffer = ctx.gpr[4u];
+                const std::uint32_t stride = ctx.gpr[5u];
+                const std::uint32_t format = ctx.gpr[6u];
+                const std::uint32_t sync = ctx.gpr[7u];
+                if ((buffer != 0u && !rt.memory().contains(buffer, 4u)) ||
+                    (stride != 0u && !rt.memory().contains(stride, 4u)) ||
+                    (format != 0u && !rt.memory().contains(format, 4u))) {
+                    ctx.set_gpr(2u, 0x800200D3u);
+                    return;
+                }
+                if (sync > 1u) { ctx.set_gpr(2u, 0x80000107u); return; }
+                const auto &state = bbs::display_state;
+                if (buffer != 0u) rt.memory().store32(buffer, state.frame_buffer);
+                if (stride != 0u) rt.memory().store32(stride, state.buffer_width);
+                if (format != 0u) rt.memory().store32(format, state.pixel_format);
+                ctx.set_gpr(2u, 0u);
+            });
+        runtime.register_hle("sceDisplay", 0x9C6EAAD7u,   // sceDisplayGetVcount
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                ctx.set_gpr(2u, static_cast<std::uint32_t>(bbs::vblank_count));
+            });
+        runtime.register_hle("sceDisplay", 0xDBA6C4C4u,   // sceDisplayGetFramePerSec
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                ctx.fpr[0u] = 59.94f;
+            });
+        runtime.register_hle("sceDisplay", 0x4D4E10ECu,   // sceDisplayIsVblank
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
+        // InterruptManager, copied from the VCS profile (vcs_profile.cpp
+        // 1285-1294, 6739-6803). Bring-up never fires the handlers; the state
+        // exists so S8's GE completion callback path has something to use.
+        struct SubInterruptRecord {
+            std::uint32_t handler{};
+            std::uint32_t argument{};
+            bool enabled{};
+            bool occurred{};
+        };
+        std::unordered_map<std::uint64_t, SubInterruptRecord> sub_interrupts;
+        auto sub_interrupt_key = [](std::uint32_t interrupt_number, std::uint32_t sub_number) -> std::uint64_t {
+            return (static_cast<std::uint64_t>(interrupt_number) << 32u) | sub_number;
+        };
+        runtime.register_hle("InterruptManager", 0xCA04A2B9u,   // sceInterruptSetHandler
+            [&sub_interrupts, &sub_interrupt_key](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                const std::uint32_t interrupt_number = ctx.gpr[4u];
+                const std::uint32_t sub_number = ctx.gpr[5u];
+                const std::uint32_t handler = ctx.gpr[6u];
+                const std::uint32_t argument = ctx.gpr[7u];
+                if (interrupt_number >= 67u || handler == 0u) {
+                    ctx.set_gpr(2u, 0x80020064u);
+                    return;
+                }
+                const std::uint64_t key = sub_interrupt_key(interrupt_number, sub_number);
+                if (sub_interrupts.contains(key)) {
+                    ctx.set_gpr(2u, 0x80020067u);  // handler already present
+                    return;
+                }
+                sub_interrupts.emplace(key, SubInterruptRecord{handler, argument, false, false});
+                if (std::getenv("PSPRECOMP_GE_DIAG") != nullptr) {
+                    std::cerr << "[intr] register int=" << interrupt_number << " sub=" << sub_number
+                              << " handler=" << psprecomp::hex32(handler)
+                              << " arg=" << psprecomp::hex32(argument) << "\n";
+                }
+                ctx.set_gpr(2u, 0u);
+            });
+        runtime.register_hle("InterruptManager", 0xD61E6961u,   // sceInterruptRemoveHandler
+            [&sub_interrupts, &sub_interrupt_key](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                const std::uint64_t key = sub_interrupt_key(ctx.gpr[4u], ctx.gpr[5u]);
+                ctx.set_gpr(2u, sub_interrupts.erase(key) == 1u ? 0u : 0x80020068u);
+            });
+        runtime.register_hle("InterruptManager", 0xFB8E22ECu,   // sceInterruptEnable
+            [&sub_interrupts, &sub_interrupt_key](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                const auto found = sub_interrupts.find(sub_interrupt_key(ctx.gpr[4u], ctx.gpr[5u]));
+                if (found == sub_interrupts.end()) { ctx.set_gpr(2u, 0x80020068u); return; }
+                found->second.enabled = true;
+                ctx.set_gpr(2u, 0u);
+            });
+        runtime.register_hle("InterruptManager", 0x8A389411u,   // sceInterruptDisable
+            [&sub_interrupts, &sub_interrupt_key](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                const auto found = sub_interrupts.find(sub_interrupt_key(ctx.gpr[4u], ctx.gpr[5u]));
+                if (found == sub_interrupts.end()) { ctx.set_gpr(2u, 0x80020068u); return; }
+                found->second.enabled = false;
+                ctx.set_gpr(2u, 0u);
+            });
+        runtime.register_hle("InterruptManager", 0x5CB5A78Bu,   // sceInterruptClear
+            [&sub_interrupts, &sub_interrupt_key](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                const auto found = sub_interrupts.find(sub_interrupt_key(ctx.gpr[4u], ctx.gpr[5u]));
+                if (found == sub_interrupts.end()) { ctx.set_gpr(2u, 0x80020068u); return; }
+                if (ctx.gpr[6u] != 0u) {
+                    if (!rt.memory().contains(ctx.gpr[6u], 4u)) { ctx.set_gpr(2u, 0x800200D3u); return; }
+                    rt.memory().store32(ctx.gpr[6u], found->second.enabled ? 1u : 0u);
+                }
+                found->second.enabled = false;
+                ctx.set_gpr(2u, 0u);
+            });
+        runtime.register_hle("InterruptManager", 0x7860E0DCu,   // sceInterruptSetGlobalPriority (enable-state variant)
+            [&sub_interrupts, &sub_interrupt_key](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                const auto found = sub_interrupts.find(sub_interrupt_key(ctx.gpr[4u], ctx.gpr[5u]));
+                if (found == sub_interrupts.end()) { ctx.set_gpr(2u, 0x80020068u); return; }
+                found->second.enabled = ctx.gpr[6u] != 0u;
+                ctx.set_gpr(2u, 0u);
+            });
+        runtime.register_hle("InterruptManager", 0xFC4374B8u,   // sceInterruptHasOccurred
+            [&sub_interrupts, &sub_interrupt_key](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                const auto found = sub_interrupts.find(sub_interrupt_key(ctx.gpr[4u], ctx.gpr[5u]));
+                ctx.set_gpr(2u, found != sub_interrupts.end() && found->second.occurred ? 1u : 0u);
+            });
+        runtime.register_hle("scePower", 0xDFA8BAF8u,   // scePowerUnregisterCallback
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
+        // BRINGUP SHIM: volatile memory lock — VCS vcs_profile.cpp:6332-6368
+        // minus the zeroing (bring-up never suspends).
+        auto volatile_mem_lock = [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            if (ctx.gpr[4u] != 0u) { ctx.set_gpr(2u, 0x80000107u); return; }
+            if (!rt.memory().contains(ctx.gpr[5u], 4u) || !rt.memory().contains(ctx.gpr[6u], 4u)) {
+                ctx.set_gpr(2u, 0x800200D3u); return;
+            }
+            rt.memory().store32(ctx.gpr[5u], 0x08400000u);
+            rt.memory().store32(ctx.gpr[6u], 0x00400000u);
+            ctx.set_gpr(2u, 0u);
+        };
+        runtime.register_hle("sceSuspendForUser", 0x3E0271D3u, volatile_mem_lock);
+        runtime.register_hle("sceSuspendForUser", 0xA14F40B2u, volatile_mem_lock);
+        runtime.register_hle("sceSuspendForUser", 0xA569E425u,   // sceKernelVolatileMemUnlock
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                ctx.set_gpr(2u, ctx.gpr[4u] == 0u ? 0u : 0x80000107u);
+            });
+        runtime.register_hle("sceSuspendForUser", 0xEADB1BD7u,   // sceKernelVolatileMemIsLocked
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                ctx.set_gpr(2u, ctx.gpr[4u] == 0u ? 0u : 0x80000107u);
             });
         runtime.register_hle("sceUtility", 0x2A2B3DE0u,
             [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
