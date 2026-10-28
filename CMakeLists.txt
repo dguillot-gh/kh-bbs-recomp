@@ -59,11 +59,26 @@ add_executable(BBSBringup
     host/disc_io.cpp
     host/thread_manager.cpp
     host/partition_memory.cpp
+    # Frame dumps (PSPRECOMP_FRAME_DUMP_DIR): VCS's capture code, unchanged.
+    "${PSPRECOMP_RUNTIME_DIR}/profiles/vcs/host/framebuffer_capture.cpp"
     "${BBS_GENERATED_DIR}/generated_registry.cpp"
     ${BBS_GENERATED_UNITS})
 target_link_libraries(BBSBringup PRIVATE psprecomp_core)
 target_include_directories(BBSBringup PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/host" "${BBS_GENERATED_DIR}")
+    "${CMAKE_CURRENT_SOURCE_DIR}/host" "${BBS_GENERATED_DIR}"
+    "${PSPRECOMP_RUNTIME_DIR}/profiles/vcs/host")
+
+# Host-side scheduler/frame-dump test: the real host/thread_manager.cpp with
+# fake guest threads, no game code. Not part of the normal build.
+# Run: .\psp.ps1 test -Game <game>   (psp-native-runtime\bringup\tests\scheduler_test.cpp)
+add_executable(SchedulerTest EXCLUDE_FROM_ALL
+    "${PSPRECOMP_RUNTIME_DIR}/bringup/tests/scheduler_test.cpp"
+    host/thread_manager.cpp
+    "${PSPRECOMP_RUNTIME_DIR}/profiles/vcs/host/framebuffer_capture.cpp")
+target_link_libraries(SchedulerTest PRIVATE psprecomp_core)
+target_include_directories(SchedulerTest PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/host" "${PSPRECOMP_RUNTIME_DIR}/profiles/vcs/host")
+target_compile_definitions(SchedulerTest PRIVATE GAME_NS=bbs)
 
 # Bring-up builds need fast feedback and manageable compiler memory. Raise the
 # optimization level only after the boot path is stable.

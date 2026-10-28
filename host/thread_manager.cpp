@@ -1,6 +1,7 @@
 #include "thread_manager.hpp"
 
 #include "display_state.hpp"
+#include "framebuffer_capture.hpp"
 #include "psprecomp/common.hpp"
 
 #include <algorithm>
@@ -661,6 +662,13 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
         runtime.register_hle("sceDisplay", nid,
             [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
                 ++vblank_count;
+                // Frame dumps (roadmap phase 1): PPM files of changed frames
+                // when PSPRECOMP_FRAME_DUMP_DIR is set (VCS's capture code,
+                // as in vcs_profile.cpp ~7037).
+                if (display_state.frame_buffer != 0u && display_state.buffer_width != 0u)
+                    vcs::capture_frame_if_requested(rt.memory(), vcs::FramebufferDescription{
+                        display_state.frame_buffer, display_state.width, display_state.height,
+                        display_state.buffer_width, display_state.pixel_format});
                 delay_yield(rt, ctx);
             });
     }
