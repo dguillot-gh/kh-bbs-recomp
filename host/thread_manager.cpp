@@ -148,20 +148,12 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
             }
             set_success(ctx);
         });
-    runtime.register_hle("ThreadManForUser", 0x4E3A1105u,
-        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
-            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
-            const auto amount = static_cast<std::int32_t>(ctx.gpr[5u]);
-            const auto it = semaphores_.find(uid);
-            if (it == semaphores_.end()) { set_error(ctx, 0x80020199u); return; }
-            if (amount <= 0 || amount > it->second.maximum) { set_error(ctx, 0x800201B0u); return; }
-            if (it->second.count < amount) { set_error(ctx, 0x800201A8u); return; }
-            it->second.count -= amount;
-            set_success(ctx);
-        });
-    // BRINGUP: sceKernelWaitSemaCB — take the count, or sleep until Post
-    // resumes us past the import with success (PW S2, VCS vcs_profile.cpp:6022-6040).
-    runtime.register_hle("ThreadManForUser", 0x6D212BACu,
+    // sceKernelWaitSema (0x4E3A1105) and WaitSemaCB (0x6D212BAC): take the
+    // count, or sleep until Post resumes us past the import with success
+    // (PW S2, VCS vcs_profile.cpp:6022-6040). The plain one used to return
+    // 0x800201A8 instead of waiting, which a PSP never does (review 10/28).
+    for (const std::uint32_t nid : {0x4E3A1105u, 0x6D212BACu})
+    runtime.register_hle("ThreadManForUser", nid,
         [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
             const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
             const auto amount = static_cast<std::int32_t>(ctx.gpr[5u]);
@@ -184,8 +176,10 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
             if (std::find(it->second.waiting.begin(), it->second.waiting.end(), self) == it->second.waiting.end())
                 it->second.waiting.push_back(self);
             const std::string reason = "semaphore wait " + std::to_string(uid);
-            if (!activate_next(rt, ctx, reason.c_str()))
+            if (!activate_next(rt, ctx, reason.c_str())) {
+                dump_threads("semaphore wait");
                 rt.stop("BBS semaphore deadlock waiting on " + std::to_string(uid));
+            }
         });
     runtime.register_hle("ThreadManForUser", 0x28B6489Cu,
         [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
