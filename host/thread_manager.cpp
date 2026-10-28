@@ -75,6 +75,10 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
         [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { exit_delete_thread(rt, ctx); });
     runtime.register_hle("ThreadManForUser", 0x278C0DF5u,
         [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { wait_thread_end(rt, ctx); });
+    runtime.register_hle("ThreadManForUser", 0x840E8133u,   // sceKernelWaitThreadEndCB: same wait, callback-interruptible == same under cooperative HLE
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { wait_thread_end(rt, ctx); });
+    runtime.register_hle("ThreadManForUser", 0x9FA03CD3u,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { delete_thread(rt, ctx); });
     runtime.register_hle("ThreadManForUser", 0x293B45B8u,
         [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
             ctx.set_gpr(2u, static_cast<std::uint32_t>(current_uid_));
@@ -853,6 +857,22 @@ void ThreadManager::wait_thread_end(psprecomp::Runtime &runtime,
     }
     if (!activate_next(runtime, ctx, "wait-thread-end"))
         runtime.stop("Peace Walker thread wait deadlock on uid " + std::to_string(target_uid));
+}
+
+void ThreadManager::delete_thread(psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+    const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+    const auto found = threads_.find(uid);
+    if (found == threads_.end()) {
+        set_error(ctx, 0x80020198u);   // SCE_KERNEL_ERROR_INVALID_THREAD
+        return;
+    }
+    if (found->second.state != State::Created && found->second.state != State::Completed) {
+        set_error(ctx, 0x800201A4u);   // SCE_KERNEL_ERROR_NOT_DORMANT
+        return;
+    }
+    end_waiters_.erase(uid);
+    threads_.erase(found);
+    set_success(ctx);
 }
 
 } // namespace bbs

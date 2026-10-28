@@ -94,6 +94,7 @@ int main(int argc, char **argv) {
         std::unordered_map<std::int32_t, std::pair<std::uint32_t, std::uint32_t>> callbacks;
         std::uint32_t exit_callback_uid = 0u;
         std::unordered_set<std::int32_t> umd_callbacks;
+        std::int32_t ge_next_callback_uid = 0xA00;
         bool umd_activated = false;
         std::uint32_t impose_language = 1u;
         std::uint32_t impose_button = 0u;
@@ -201,6 +202,24 @@ int main(int argc, char **argv) {
             });
         runtime.register_hle("sceUmdUser", 0x6AF9B50Au,
             [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
+        // sceGeEdramGetAddr(): return the guest physical address where the runtime
+        // maps EDRAM (kVramPhysicalBase), matching the VCS profile.
+        runtime.register_hle("sceGe_user", 0xE47E40E4u,
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                ctx.set_gpr(2u, psprecomp::GuestMemory::kVramPhysicalBase);
+            });
+        // sceGeSetCallback(struct *cb): registers a GE completion callback.
+        // Bringup has no GE execution, so validate the struct (VCS profile
+        // does the same) and hand out an id without ever firing the callback.
+        runtime.register_hle("sceGe_user", 0xA4FC06A4u,
+            [&ge_next_callback_uid](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                const std::uint32_t callback_data = ctx.gpr[4u];
+                if (callback_data == 0u || !rt.memory().contains(callback_data, 16u)) {
+                    ctx.set_gpr(2u, 0x800200D3u); // SCE_KERNEL_ERROR_ILLEGAL_ADDR
+                    return;
+                }
+                ctx.set_gpr(2u, static_cast<std::uint32_t>(ge_next_callback_uid++));
+            });
         runtime.register_hle("sceUtility", 0xA5DA2406u,
             [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
                 // PSP SystemParam integer IDs: defaults for a US/English system.

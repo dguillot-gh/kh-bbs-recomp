@@ -7,6 +7,33 @@ Build and run from the workspace root: `.\psp.ps1 -Game bbs -Stage regen|build|r
 Inputs (local only): `extracted\KingdomHeartsBirthBySleep\` (`decrypted\EBOOT.BIN.dec`,
 `disc-files\`, corpus `generated-psprecomp-fixed32k\`, or `generated-v2\` after a regen).
 
+## Session 2026-10-28 (home PC): S1 done — PGD archives decrypted, loader passes
+
+- **Correction to the review below:** the PGD archives use **three different keys**, not one.
+  All three sit contiguously at EBOOT file offset `0x32E3D8` (VA `0x08B313D8`), 16 bytes each:
+  - BBS1.DAT: `77b9de64cd1fc39279d190564728a378`
+  - BBS2.DAT: `8f67981eacf0717434b1a5f98a0cd18e`
+  - BBS3.DAT: `7f0067c280626625276e8c3eb8307345`
+  Decrypted sizes: BBS1 206176256 B, BBS2 206276608 B, BBS3 231120896 B (BBS3 plaintext
+  starts `bbs3.dat`). Command: `pgddec.exe <in.DAT> <out.DAT> <key>` (flags 2, then 1; no
+  libkirk edits were needed).
+- **Run loop (5 cycles, `20261028-100243-run.log` is the last):**
+  1. `sceKernelWaitThreadEndCB` (0x840E8133) — mapped to the existing `wait_thread_end`
+     (cooperative HLE: CB variants have the same semantics). Both hosts, both NID tables.
+  2. `sceKernelDeleteThread` (0x9FA03CD3) — new `ThreadManager::delete_thread`: only
+     Created/Completed may be deleted (0x800201A4 otherwise, 0x80020198 unknown); erases the
+     record and its end-waiters; stacks stay reserved (bump allocator has no free list).
+     Mirrored from kh-bbs into PW.
+  3. `sceGeEdramGetAddr` (0xE47E40E4) — returns `kVramPhysicalBase` (PW main.cpp).
+  4. `sceGeSetCallback` (0xA4FC06A4) — validates the 16-byte struct, hands out a uid,
+     never fires (PW main.cpp).
+  5. `sceGeListEnQueue` (0xAB49E76A) — **stop.** Needs the GE display-list engine; that's
+     PW's S2 (GE shim) and S7-S8 (real GE), which BBS picks up in S3/S9.
+- **Done-when fired (log 20261028-100243, lines 242/244):** `[watch-write] uid=2
+  name=DiscInfoBind ... 0x09A7A668 old=0x0 new=0x1`, then `[pw-thread] switch
+  reason=thread-return uid=1 name=user_main pc=0x0880F6F8`. After that the guest creates
+  the `SceGuSignal` event flag (uid 2305) and calls into GE init — the loader is through.
+
 ## Review 2026-10-28 (work PC): BBS1-3.DAT are PGD-encrypted; fix written (not built)
 
 - `head -c 16` of the archives: **BBS1/2/3.DAT start with `00 50 47 44` = `\0PGD`** (amctrl DRM).

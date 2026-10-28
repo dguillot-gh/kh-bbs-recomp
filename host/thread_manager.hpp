@@ -44,6 +44,7 @@ private:
     void start_thread(psprecomp::Runtime &, psprecomp::AllegrexContext &);
     void exit_delete_thread(psprecomp::Runtime &, psprecomp::AllegrexContext &);
     void wait_thread_end(psprecomp::Runtime &, psprecomp::AllegrexContext &);
+    void delete_thread(psprecomp::Runtime &, psprecomp::AllegrexContext &);
     void enqueue(std::int32_t uid, const psprecomp::AllegrexContext &context);
     bool activate_next(psprecomp::Runtime &, psprecomp::AllegrexContext &, const char *reason);
     void wake_thread_end_waiters(std::int32_t completed_uid);
