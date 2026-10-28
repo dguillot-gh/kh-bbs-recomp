@@ -313,6 +313,34 @@ int main(int argc, char **argv) {
         // AC power: report online (1) so the game never takes battery-saving paths.
         runtime.register_hle("scePower", 0x87440F5Eu,
             [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 1u); });
+        // BRINGUP: sceKernelGetSystemTimeLow — return the low 32 bits of the
+        // monotonic microsecond clock (VCS vcs_profile.cpp:5810-5813 does the
+        // same; the game's pointer arguments go unused).
+        runtime.register_hle("ThreadManForUser", 0x369ED59Du,
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                const auto usec = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count());
+                ctx.set_gpr(2u, static_cast<std::uint32_t>(usec));
+            });
+        // BRINGUP: scePowerGetPllClockFrequencyInt — the BBS caller
+        // (generated_unit_0000.cpp L_0880745C) wants the low-power 222 MHz
+        // mode and compares v0 to it, calling
+        // scePowerSetClockFrequency350 (0xEBD177D6) on mismatch. Return 222
+        // so the query takes the "already set" fast path; a0/a3 are unused
+        // (third-birthday's h_PowerPll does the same with 222).
+        runtime.register_hle("scePower", 0x34F9C463u,
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 222u); });
+        // BRINGUP: sceKernelReferThreadStatus — BBS callers pass (thid, info)
+        // with info[0]=108 pre-filled (generated_unit_0001.cpp L_0880D6B4,
+        // generated_unit_0085.cpp L_08AB0C5C). Return UNKNOWN_THID
+        // (0x80020198, as third-birthday's h_ReferThreadStatus does on miss)
+        // and leave the buffer untouched: the unit_0001 caller takes the
+        // v0!=0 path straight to its epilogue, avoiding a read of a buffer
+        // word it would otherwise use as a pointer, and the unit_0085 helper
+        // returns 0 ("not found") to its caller.
+        runtime.register_hle("ThreadManForUser", 0x17C1684Eu,
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0x80020198u); });
         runtime.register_hle("sceRtc", 0xE7C27D1Bu,
             [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
                 const std::uint32_t output = ctx.gpr[4u];

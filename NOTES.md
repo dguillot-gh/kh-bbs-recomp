@@ -7,7 +7,38 @@ Build and run from the workspace root: `.\psp.ps1 -Game bbs -Stage regen|build|r
 Inputs (local only): `extracted\KingdomHeartsBirthBySleep\` (`decrypted\EBOOT.BIN.dec`,
 `disc-files\`, corpus `generated-psprecomp-fixed32k\`, or `generated-v2\` after a regen).
 
-## Current: session 2026-10-28 (home PC), S1 done — PGD archives decrypted, loader passes
+## Current: session 2026-10-28 (home PC), S3 — into the frame loop (GE shim + display/ctrl in; crashes in delay_yield)
+
+- **Step 1 (done):** copied PW's GE shim + display/ctrl handlers from `mgs-peace-walker\host\`
+  into `kh-bbs\host\` (same code, `BRINGUP SHIM` comments kept). One build, clean.
+- **New BBS-only handlers (in, `host\main.cpp`):** boot between the loader and the frame loop
+  needed three more HLEs PW didn't hit:
+  - `ThreadManForUser::0x369ED59D` sceKernelGetSystemTimeLow — low 32 bits of a steady µs clock.
+  - `scePower::0x34F9C463` scePowerGetPllClockFrequencyInt — BBS caller wants 222 MHz; "already
+    set" fast path, returns 222.
+  - `ThreadManForUser::0x17C1684E` sceKernelReferThreadStatus — returns UNKNOWN_THID (0x80020198),
+    leaves the caller's buffer untouched.
+- **Where it runs (log `20261028-160546-run.log`, lines 364-374):** PGD load, GE init and
+  thread/Power setup all pass. Threads up: user_main (uid 1, prio 19), DiscInfoBind (uid 2, 20),
+  AsyncFileAccess (uid 3, 20), RsrcBuilder (uid 4, 21). Then **FlipThread (uid 5, prio 16 —
+  HIGHEST)** is created and started; it signals FlipSema 0x602 (`sceKernelSignalSema` 0x3F53E640),
+  then calls `sceKernelSleepThread` (0x9ACE131E).
+- **The stop (NOT Done-when):** raw host access violation, **0xC0000005 / exit -1073741819**, the
+  moment FlipThread yields to its ready background peers. A pinpoint diagnostic at the top of
+  `delay_yield` printed `[pw-diag] delay_yield current=` and died — so the fault is reading the
+  ThreadManager's **own** state (`current_uid_`/`ready_`/`threads_`), not `activate_next`.
+  That's a raw hardware AV (a C++ throw would be 0xE06D7363; an AOT guest OOB would throw too), so
+  it's a **heap-corruption of the scheduler's containers**, BBS-specific: the same `delay_yield`
+  runs PW fine (S2/S2b), and the BBS trigger is FlipThread (highest prio, first to yield to ready
+  uid 3/4) — a host-side OOB write from a BBS handler corrupting the ThreadManager. **No
+  handler-copy fix; needs AddressSanitizer.** Carried to **S3b**.
+- **Budget:** 5 of 6 run cycles used (cycles 1-3: the three handlers above; cycle 4: first crash
+  report; cycle 5: the diagnostic that pinpointed `delay_yield`). Closing on bookkeeping rather than
+  spending the 6th on an unpinnable heap bug.
+- **Next (S3b):** ASAN / CRT-debug-heap build of `kh-bbs`, catch the OOB write that corrupts
+  `ready_`/`threads_`; fix it; then BBS should pass the FlipThread yield and reach the vblank loop.
+
+## Earlier (2026-10-28): S1 done — PGD archives decrypted, loader passes
 
 - **Correction to the review below:** the PGD archives use **three different keys**, not one.
   All three sit contiguously at EBOOT file offset `0x32E3D8` (VA `0x08B313D8`), 16 bytes each:
