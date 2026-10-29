@@ -67,7 +67,10 @@ foreach(name framebuffer_capture ge_renderer ge_gpu_backend_dx12 vcs_config
     list(APPEND PSP_VCS_RENDERER_SOURCES "${PSP_VCS_HOST_DIR}/${name}.cpp")
 endforeach()
 # GE HLEs shared by the game hosts (display lists -> the renderer above).
-list(APPEND PSP_VCS_RENDERER_SOURCES "${PSPRECOMP_RUNTIME_DIR}/host-shared/ge_display.cpp")
+list(APPEND PSP_VCS_RENDERER_SOURCES
+    "${PSPRECOMP_RUNTIME_DIR}/host-shared/ge_display.cpp"
+    "${PSPRECOMP_RUNTIME_DIR}/host-shared/guest_calls.cpp"
+    "${PSPRECOMP_RUNTIME_DIR}/host-shared/interrupts.cpp")
 
 add_executable(BBSBringup
     host/main.cpp

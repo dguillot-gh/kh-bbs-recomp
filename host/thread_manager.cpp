@@ -2,6 +2,7 @@
 
 #include "display_state.hpp"
 #include "framebuffer_capture.hpp"
+#include "interrupts.hpp"
 #include "psprecomp/common.hpp"
 
 #include <algorithm>
@@ -236,6 +237,38 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
             const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
             if (semaphores_.erase(uid) == 0u) { set_error(ctx, 0x80020199u); return; }
             set_success(ctx);
+        });
+    // sceKernelChangeThreadPriority(uid, priority) (VCS vcs_profile.cpp:5693-5745).
+    // uid 0 = the caller, priority 0 = the caller's priority. A scheduling point:
+    // if a ready thread now outranks the caller, the caller yields to it.
+    runtime.register_hle("ThreadManForUser", 0x71BC9871u,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const std::int32_t uid = ctx.gpr[4u] == 0u ? current_uid_ : static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto current = threads_.find(current_uid_);
+            std::uint32_t priority = ctx.gpr[5u];
+            if (priority == 0u && current != threads_.end()) priority = current->second.priority;
+            const auto found = threads_.find(uid);
+            if (found == threads_.end()) { set_error(ctx, 0x80020198u); return; }   // UNKNOWN_THID
+            if (found->second.state == State::Created || found->second.state == State::Completed) {
+                set_error(ctx, 0x800201A2u);                                       // DORMANT
+                return;
+            }
+            if (priority < 0x08u || priority > 0x77u) { set_error(ctx, 0x80020193u); return; } // ILLEGAL_PRIORITY
+            found->second.priority = priority;
+            set_success(ctx);
+            if (thread_diag_enabled())
+                std::cerr << "[pw-thread] priority uid=" << uid << " value=" << priority << "\n";
+            if (current == threads_.end()) return;
+            const bool outranked = std::any_of(ready_.begin(), ready_.end(), [this, &current](const ReadyItem &item) {
+                const auto t = threads_.find(item.uid);
+                return t != threads_.end() && t->second.state == State::Ready &&
+                       t->second.priority < current->second.priority;
+            });
+            if (!outranked) return;
+            psprecomp::AllegrexContext caller = ctx;
+            caller.pc = ctx.gpr[31u];
+            enqueue(current_uid_, caller);
+            (void)activate_next(rt, ctx, "change-priority");
         });
     runtime.register_hle("ThreadManForUser", 0x912354A7u,
         [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
@@ -661,6 +694,10 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
     for (const std::uint32_t nid : {0x984C27E7u, 0x46F186C3u, 0x36CDFADEu, 0x8EB9EC49u}) {
         runtime.register_hle("sceDisplay", nid,
             [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                // First the game's vblank interrupt handlers (guest code); they
+                // resume this same import, which then counts the frame and waits.
+                // (PW's frame limiter waits for a counter its handler increments.)
+                if (psphost::deliver_vblank_interrupt(ctx)) return;
                 ++vblank_count;
                 // Frame dumps (roadmap phase 1): PPM files of changed frames
                 // when PSPRECOMP_FRAME_DUMP_DIR is set (VCS's capture code,

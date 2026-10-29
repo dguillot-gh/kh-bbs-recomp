@@ -6,6 +6,7 @@
 #include "disc_io.hpp"
 #include "display_state.hpp"
 #include "ge_display.hpp"
+#include "interrupts.hpp"
 
 #include <cstdint>
 #include <algorithm>
@@ -473,84 +474,10 @@ int main(int argc, char **argv) {
             });
         runtime.register_hle("sceDisplay", 0x4D4E10ECu,   // sceDisplayIsVblank
             [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
-        // InterruptManager, copied from the VCS profile (vcs_profile.cpp
-        // 1285-1294, 6739-6803). Bring-up never fires the handlers; the state
-        // exists so S8's GE completion callback path has something to use.
-        struct SubInterruptRecord {
-            std::uint32_t handler{};
-            std::uint32_t argument{};
-            bool enabled{};
-            bool occurred{};
-        };
-        std::unordered_map<std::uint64_t, SubInterruptRecord> sub_interrupts;
-        auto sub_interrupt_key = [](std::uint32_t interrupt_number, std::uint32_t sub_number) -> std::uint64_t {
-            return (static_cast<std::uint64_t>(interrupt_number) << 32u) | sub_number;
-        };
-        runtime.register_hle("InterruptManager", 0xCA04A2B9u,   // sceInterruptSetHandler
-            [&sub_interrupts, &sub_interrupt_key](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
-                const std::uint32_t interrupt_number = ctx.gpr[4u];
-                const std::uint32_t sub_number = ctx.gpr[5u];
-                const std::uint32_t handler = ctx.gpr[6u];
-                const std::uint32_t argument = ctx.gpr[7u];
-                if (interrupt_number >= 67u || handler == 0u) {
-                    ctx.set_gpr(2u, 0x80020064u);
-                    return;
-                }
-                const std::uint64_t key = sub_interrupt_key(interrupt_number, sub_number);
-                if (sub_interrupts.contains(key)) {
-                    ctx.set_gpr(2u, 0x80020067u);  // handler already present
-                    return;
-                }
-                sub_interrupts.emplace(key, SubInterruptRecord{handler, argument, false, false});
-                if (std::getenv("PSPRECOMP_GE_DIAG") != nullptr) {
-                    std::cerr << "[intr] register int=" << interrupt_number << " sub=" << sub_number
-                              << " handler=" << psprecomp::hex32(handler)
-                              << " arg=" << psprecomp::hex32(argument) << "\n";
-                }
-                ctx.set_gpr(2u, 0u);
-            });
-        runtime.register_hle("InterruptManager", 0xD61E6961u,   // sceInterruptRemoveHandler
-            [&sub_interrupts, &sub_interrupt_key](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
-                const std::uint64_t key = sub_interrupt_key(ctx.gpr[4u], ctx.gpr[5u]);
-                ctx.set_gpr(2u, sub_interrupts.erase(key) == 1u ? 0u : 0x80020068u);
-            });
-        runtime.register_hle("InterruptManager", 0xFB8E22ECu,   // sceInterruptEnable
-            [&sub_interrupts, &sub_interrupt_key](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
-                const auto found = sub_interrupts.find(sub_interrupt_key(ctx.gpr[4u], ctx.gpr[5u]));
-                if (found == sub_interrupts.end()) { ctx.set_gpr(2u, 0x80020068u); return; }
-                found->second.enabled = true;
-                ctx.set_gpr(2u, 0u);
-            });
-        runtime.register_hle("InterruptManager", 0x8A389411u,   // sceInterruptDisable
-            [&sub_interrupts, &sub_interrupt_key](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
-                const auto found = sub_interrupts.find(sub_interrupt_key(ctx.gpr[4u], ctx.gpr[5u]));
-                if (found == sub_interrupts.end()) { ctx.set_gpr(2u, 0x80020068u); return; }
-                found->second.enabled = false;
-                ctx.set_gpr(2u, 0u);
-            });
-        runtime.register_hle("InterruptManager", 0x5CB5A78Bu,   // sceInterruptClear
-            [&sub_interrupts, &sub_interrupt_key](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
-                const auto found = sub_interrupts.find(sub_interrupt_key(ctx.gpr[4u], ctx.gpr[5u]));
-                if (found == sub_interrupts.end()) { ctx.set_gpr(2u, 0x80020068u); return; }
-                if (ctx.gpr[6u] != 0u) {
-                    if (!rt.memory().contains(ctx.gpr[6u], 4u)) { ctx.set_gpr(2u, 0x800200D3u); return; }
-                    rt.memory().store32(ctx.gpr[6u], found->second.enabled ? 1u : 0u);
-                }
-                found->second.enabled = false;
-                ctx.set_gpr(2u, 0u);
-            });
-        runtime.register_hle("InterruptManager", 0x7860E0DCu,   // sceInterruptSetGlobalPriority (enable-state variant)
-            [&sub_interrupts, &sub_interrupt_key](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
-                const auto found = sub_interrupts.find(sub_interrupt_key(ctx.gpr[4u], ctx.gpr[5u]));
-                if (found == sub_interrupts.end()) { ctx.set_gpr(2u, 0x80020068u); return; }
-                found->second.enabled = ctx.gpr[6u] != 0u;
-                ctx.set_gpr(2u, 0u);
-            });
-        runtime.register_hle("InterruptManager", 0xFC4374B8u,   // sceInterruptHasOccurred
-            [&sub_interrupts, &sub_interrupt_key](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
-                const auto found = sub_interrupts.find(sub_interrupt_key(ctx.gpr[4u], ctx.gpr[5u]));
-                ctx.set_gpr(2u, found != sub_interrupts.end() && found->second.occurred ? 1u : 0u);
-            });
+        // InterruptManager (sub-interrupt handlers): shared with the other game,
+        // psp-native-runtime/host-shared/interrupts.cpp. Vblank (interrupt 30)
+        // handlers run as guest code at each vblank wait (thread_manager.cpp).
+        psphost::install_interrupts(runtime);
         runtime.register_hle("scePower", 0xDFA8BAF8u,   // scePowerUnregisterCallback
             [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
         // BRINGUP SHIM: volatile memory lock — VCS vcs_profile.cpp:6332-6368
