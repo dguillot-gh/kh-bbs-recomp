@@ -88,6 +88,45 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
         [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
             ctx.set_gpr(2u, static_cast<std::uint32_t>(current_uid_));
         });
+    // The same sceKernelGetThreadId, imported through Kernel_Library too.
+    runtime.register_hle("Kernel_Library", 0x293B45B8u,
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            ctx.set_gpr(2u, static_cast<std::uint32_t>(current_uid_));
+        });
+    // sceKernelReferThreadStatus(uid, SceKernelThreadInfo *): uid 0 = the caller.
+    // The game fills info->size (108) first. Its heap setup (unit_0001
+    // L_0880D6CC) reads info->stack (+48) and builds the allocator only on
+    // success; the old UNKNOWN_THID stub left that allocator null (11/03).
+    runtime.register_hle("ThreadManForUser", 0x17C1684Eu,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const std::int32_t uid = ctx.gpr[4u] == 0u ? current_uid_ : static_cast<std::int32_t>(ctx.gpr[4u]);
+            const std::uint32_t info = ctx.gpr[5u];
+            const auto found = threads_.find(uid);
+            if (found == threads_.end()) { set_error(ctx, 0x80020198u); return; }   // UNKNOWN_THID
+            if (!rt.memory().contains(info, 4u)) { set_error(ctx, 0x800200D3u); return; }
+            const std::uint32_t size = rt.memory().load32(info);
+            if (size < 104u || !rt.memory().contains(info, size)) { set_error(ctx, 0x800200D2u); return; }
+            const Thread &thread = found->second;
+            rt.memory().zero(info + 4u, size - 4u);
+            for (std::uint32_t i = 0u; i < 31u && i < thread.name.size(); ++i)
+                rt.memory().store8(info + 4u + i, static_cast<std::uint8_t>(thread.name[i]));
+            std::uint32_t status = 0x02u;                                             // ready
+            switch (thread.state) {
+            case State::Running: status = 0x01u; break;
+            case State::Sleeping: case State::Asleep: case State::Delayed: status = 0x04u; break;
+            case State::Created: case State::Completed: status = 0x10u; break;     // dormant
+            default: break;
+            }
+            rt.memory().store32(info + 36u, 0x80000000u);                             // attr: user mode
+            rt.memory().store32(info + 40u, status);
+            rt.memory().store32(info + 44u, thread.entry);
+            rt.memory().store32(info + 48u, thread.stack_bottom);
+            rt.memory().store32(info + 52u, thread.stack_top - thread.stack_bottom);
+            rt.memory().store32(info + 56u, thread.context.gpr[28u]);
+            rt.memory().store32(info + 60u, thread.priority);
+            rt.memory().store32(info + 64u, thread.priority);
+            set_success(ctx);
+        });
     runtime.register_hle("ThreadManForUser", 0x19CFF145u,
         [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
             const std::uint32_t work = ctx.gpr[4u];
@@ -205,6 +244,16 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
             ctx.set_gpr(2u, static_cast<std::uint32_t>(uid));
         });
     runtime.register_hle("ThreadManForUser", 0xB011B11Fu,
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto it = semaphores_.find(uid);
+            if (it == semaphores_.end()) { set_error(ctx, 0x80020199u); return; }
+            if (it->second.count < 1) { set_error(ctx, 0x800201A8u); return; }
+            it->second.count = 0;
+            set_success(ctx);
+        });
+    // LockMutexCB: same as Lock (callbacks are not run here).
+    runtime.register_hle("ThreadManForUser", 0x5BF4DD27u,
         [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
             const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
             const auto it = semaphores_.find(uid);
@@ -682,11 +731,15 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
         [event_flag_wait](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
             event_flag_wait(rt, ctx, "event-flag-wait-cb");
         });
-    // sceKernelDelayThread(CB): the duration and the CB callback argument are
-    // ignored; the caller waits until no other thread is ready (delay_yield).
+    // sceKernelDelayThread(CB): the duration moves virtual time on (due alarm
+    // handlers run first); then the caller waits until no other thread is
+    // ready (delay_yield). The CB callback argument is ignored.
     for (const std::uint32_t nid : {0xCEADEB47u, 0x68DA9E36u}) {
         runtime.register_hle("ThreadManForUser", nid,
-            [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { delay_yield(rt, ctx); });
+            [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                if (psphost::deliver_alarms(ctx, ctx.gpr[4u])) return;
+                delay_yield(rt, ctx);
+            });
     }
     // sceDisplay vblank waits (bring-up): count the frame and wait like a
     // DelayThread (delay_yield: other ready threads run first), return 0.
@@ -720,6 +773,15 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
     runtime.register_hle("ThreadManForUser", 0xD59EAD2Fu,
         [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
             wake_thread(rt, static_cast<std::int32_t>(ctx.gpr[4u]), ctx);
+        });
+    // sceKernelCancelWakeupThread(uid): drop pending wakeups, return how many there were.
+    runtime.register_hle("ThreadManForUser", 0xFCCFAD26u,
+        [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+            const std::int32_t uid = ctx.gpr[4u] == 0u ? current_uid_ : static_cast<std::int32_t>(ctx.gpr[4u]);
+            const auto found = threads_.find(uid);
+            if (found == threads_.end()) { set_error(ctx, 0x80020198u); return; }   // UNKNOWN_THID
+            ctx.set_gpr(2u, found->second.wakeup);
+            found->second.wakeup = 0u;
         });
 }
 

@@ -18,6 +18,8 @@ public:
     void install_hles(psprecomp::Runtime &runtime);
     void set_heap_end_source(std::function<std::uint32_t()> source) { heap_end_source_ = std::move(source); }
     [[nodiscard]] std::uint32_t stack_floor() const noexcept { return next_stack_top_; }
+    // Blocking HLEs outside this class (audio output) wait the way DelayThread does.
+    void wait_like_delay(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) { delay_yield(runtime, ctx); }
 
 private:
     // DelayThread(CB) and the vblank waits: park the caller (State::Delayed)

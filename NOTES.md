@@ -7,7 +7,38 @@ Build and run from the workspace root: `.\psp.ps1 -Game bbs -Stage regen|build|r
 Inputs (local only): `extracted\KingdomHeartsBirthBySleep\` (`decrypted\EBOOT.BIN.dec`,
 `disc-files\`, corpus `generated-psprecomp-fixed32k\`, or `generated-v2\` after a regen).
 
-## Current review 2026-10-28 evening (work PC, read first): the S3 crash is a dangling lambda capture (fixed, not built)
+## Current: work-laptop session 2026-11-03 (clang; read first): first sceDisplaySetFrameBuf, then a null object
+
+Built with `psp-native-runtime\bringup\clang-build.sh bbs` (this laptop has no MSVC/CMake) on the 10/27
+`generated-v2`, copied over `out\Release\BBSBringup.exe` (the 10/28 MSVC exe kept as `*.msvc-20261028.exe`).
+`.\psp.ps1 test` not run (needs CMake). Runs: `.\psp.ps1 -Game bbs -Stage run -Trace -MaxDispatch 8000000`.
+1. The FlipThread crash is gone (the 10/28 review's lambda fix works).
+2. Stops met and fixed, in order (all in `host\main.cpp` unless noted):
+   - `sceAudio` 0x01562BA3 (Output2Reserve) and the rest of sceAudio: no sound; return values as VCS; the blocking
+     outputs wait like DelayThread (`ThreadManager::wait_like_delay`) and move virtual time by the buffer length.
+   - `sceSasCore` (all 27 imports): silent; every voice reads as ended, `__sceSasCore` writes a grain of silence.
+   - `sceAtrac3plus` (9 imports): IDs handed out, every decode returns 0 samples with the end flag set.
+   - `sceKernelLockMutexCB` (0x5BF4DD27, thread_manager.cpp): same as LockMutex.
+   - `sceKernelGetSystemTimeWide` / `sceKernelGetSystemTime`: the monotonic clock (Wide = v0:v1).
+   - `sceKernelSetAlarm` / SetSysClockAlarm / CancelAlarm: `psp-native-runtime\host-shared\interrupts.cpp`.
+   - `sceUtilityGetSystemParamString` (nickname "PSP"), `sceNetGetLocalEtherAddr`, `sceNetEtherNtostr`.
+   - **Null heap object at 0x08807ABC: the old `sceKernelReferThreadStatus` stub returned UNKNOWN_THID**, so the
+     game's heap setup (unit_0001 L_0880D698, info->stack at +48) never ran and the allocator global 0x08B5BD98 stayed
+     0. Now a real SceKernelThreadInfo in thread_manager.cpp (the main.cpp stub is gone).
+   - `sceKernelCancelWakeupThread` (0xFCCFAD26), `Kernel_Library::sceKernelGetThreadId` (thread_manager.cpp).
+3. Then only AUDIO and Sd::UpdateMSec ran (alarms one-shot, then: vblank handlers ran only on vblank waits).
+   **user_main waits on sema 0x602 (WaitSemaCB), which FlipThread signals; FlipThread is woken by the vblank
+   handler 0x0880919C (int 30 sub 0), and no thread waits for vblank.** Fix (interrupts.cpp, shared): alarms are
+   periodic with their first interval, and vblank follows the virtual clock (DelayThread and the audio waits move
+   it; `deliver_alarms` runs the vblank handlers once per 16.683 ms crossed).
+4. **Now: `sceDisplaySetFrameBuf` twice (0x04000000, then 0x04044000), then exit 1:** guest access at 0x00000048 in
+   0x08A8BC6C (unit_0080, thread on stack ~0x09FC2FE0): `0x0883BA98(...)` returned 0 and 0x08836660 reads +0x48.
+   0x0883BA98 is a dispatcher into 0x0883DA0C (args: a stack struct, 1, 0, 1, t0=0). All file reads in the
+   IO trace succeed (`PSPRECOMP_IO_TRACE=1`), so it is not a missing file. Next: find what 0x0883DA0C looks up
+   (a resource table filled by RsrcBuilder?) and which HLE result it depends on.
+- Log: `logs\bbs\20261103-122609-run.log`; IO trace run right after it.
+
+## Earlier review 2026-10-28 evening (work PC): the S3 crash is a dangling lambda capture (fixed, not built)
 
 - `host\thread_manager.cpp`, the 4 vblank waits (~692) and SleepThread(CB) (~703) were
   registered with `[this, &delay_yield]`: a reference to a local lambda of `install_hles`. It dies

@@ -10,12 +10,14 @@
 
 #include <cstdint>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <ctime>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <stdexcept>
@@ -224,6 +226,44 @@ int main(int argc, char **argv) {
         // trampoline). Replaces the 10/28 BRINGUP SHIM. PSPRECOMP_GE_DIAG=1 logs it.
         psphost::install_ge_display(runtime, psphost::GeDisplayOptions{
             [&compiled_sdk_version] { return compiled_sdk_version; }});
+        // BRINGUP SHIM: sceNetGetLocalEtherAddr(mac[6]): a fixed, locally administered MAC.
+        runtime.register_hle("sceNet", 0x0BF0A3AEu,
+            [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                static constexpr std::uint8_t mac[6] = {0x02u, 0x00u, 0x00u, 0x00u, 0x00u, 0x01u};
+                const std::uint32_t out = ctx.gpr[4u];
+                if (!rt.memory().contains(out, 6u)) { ctx.set_gpr(2u, 0x800200D3u); return; }
+                for (std::uint32_t i = 0u; i < 6u; ++i) rt.memory().store8(out + i, mac[i]);
+                ctx.set_gpr(2u, 0u);
+            });
+        // sceNetEtherNtostr(mac[6], str): "xx:xx:xx:xx:xx:xx" + NUL.
+        runtime.register_hle("sceNet", 0x89360950u,
+            [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                const std::uint32_t mac = ctx.gpr[4u];
+                const std::uint32_t out = ctx.gpr[5u];
+                if (!rt.memory().contains(mac, 6u) || !rt.memory().contains(out, 18u)) { ctx.set_gpr(2u, 0x800200D3u); return; }
+                static constexpr char hex[] = "0123456789abcdef";
+                for (std::uint32_t i = 0u; i < 6u; ++i) {
+                    const std::uint8_t byte = rt.memory().load8(mac + i);
+                    rt.memory().store8(out + i * 3u, static_cast<std::uint8_t>(hex[byte >> 4u]));
+                    rt.memory().store8(out + i * 3u + 1u, static_cast<std::uint8_t>(hex[byte & 15u]));
+                    rt.memory().store8(out + i * 3u + 2u, i == 5u ? 0u : static_cast<std::uint8_t>(':'));
+                }
+                ctx.set_gpr(2u, 0u);
+            });
+        // sceUtilityGetSystemParamString(id, buf, len): only id 1, the nickname.
+        runtime.register_hle("sceUtility", 0x34B78343u,
+            [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                static constexpr char nickname[] = "PSP";
+                const std::uint32_t buffer = ctx.gpr[5u];
+                const std::uint32_t length = ctx.gpr[6u];
+                if (ctx.gpr[4u] != 1u) { ctx.set_gpr(2u, 0x80110103u); return; }   // invalid id
+                if (length < sizeof(nickname) || !rt.memory().contains(buffer, sizeof(nickname))) {
+                    ctx.set_gpr(2u, 0x80110104u); return;                         // buffer too small
+                }
+                for (std::uint32_t i = 0u; i < sizeof(nickname); ++i)
+                    rt.memory().store8(buffer + i, static_cast<std::uint8_t>(nickname[i]));
+                ctx.set_gpr(2u, 0u);
+            });
         runtime.register_hle("sceUtility", 0xA5DA2406u,
             [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
                 // PSP SystemParam integer IDs: defaults for a US/English system.
@@ -275,6 +315,27 @@ int main(int argc, char **argv) {
                         std::chrono::steady_clock::now().time_since_epoch()).count());
                 ctx.set_gpr(2u, static_cast<std::uint32_t>(usec));
             });
+        // sceKernelGetSystemTimeWide: the same clock, 64 bits in v0:v1.
+        runtime.register_hle("ThreadManForUser", 0x82BC5777u,
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                const auto usec = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count());
+                ctx.set_gpr(2u, static_cast<std::uint32_t>(usec));
+                ctx.set_gpr(3u, static_cast<std::uint32_t>(usec >> 32u));
+            });
+        // sceKernelGetSystemTime(SceKernelSysClock *): the same clock, stored as low, high.
+        runtime.register_hle("ThreadManForUser", 0xDB738F35u,
+            [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                const auto usec = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count());
+                const std::uint32_t clock = ctx.gpr[4u];
+                if (!rt.memory().contains(clock, 8u)) { ctx.set_gpr(2u, 0x800200D3u); return; }
+                rt.memory().store32(clock, static_cast<std::uint32_t>(usec));
+                rt.memory().store32(clock + 4u, static_cast<std::uint32_t>(usec >> 32u));
+                ctx.set_gpr(2u, 0u);
+            });
         // BRINGUP: scePowerGetPllClockFrequencyInt — the BBS caller
         // (generated_unit_0000.cpp L_0880745C) wants the low-power 222 MHz
         // mode and compares v0 to it, calling
@@ -283,16 +344,8 @@ int main(int argc, char **argv) {
         // (third-birthday's h_PowerPll does the same with 222).
         runtime.register_hle("scePower", 0x34F9C463u,
             [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 222u); });
-        // BRINGUP: sceKernelReferThreadStatus — BBS callers pass (thid, info)
-        // with info[0]=108 pre-filled (generated_unit_0001.cpp L_0880D6B4,
-        // generated_unit_0085.cpp L_08AB0C5C). Return UNKNOWN_THID
-        // (0x80020198, as third-birthday's h_ReferThreadStatus does on miss)
-        // and leave the buffer untouched: the unit_0001 caller takes the
-        // v0!=0 path straight to its epilogue, avoiding a read of a buffer
-        // word it would otherwise use as a pointer, and the unit_0085 helper
-        // returns 0 ("not found") to its caller.
-        runtime.register_hle("ThreadManForUser", 0x17C1684Eu,
-            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0x80020198u); });
+        // sceKernelReferThreadStatus is in thread_manager.cpp (fills the real
+        // SceKernelThreadInfo: the game's heap setup depends on it).
         runtime.register_hle("sceRtc", 0xE7C27D1Bu,
             [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
                 const std::uint32_t output = ctx.gpr[4u];
@@ -672,6 +725,179 @@ int main(int argc, char **argv) {
         bbs::ThreadManager threads;
         threads.initialize(runtime, runtime.cpu().gpr[29u]);
         threads.install_hles(runtime);
+        // BRINGUP SHIM: sceAudio without sound. Return values follow the VCS
+        // profile (vcs_profile.cpp 7261-7480); the blocking outputs wait like
+        // DelayThread so the audio thread gives the others a turn.
+        {
+            struct AudioChannel { bool reserved = false; std::uint32_t samples = 0u; };
+            auto channels = std::make_shared<std::array<AudioChannel, 9>>(); // 0-7 + Output2 (8)
+            // `threads` lives until main returns, after the runtime stops: the
+            // pointer is captured by value, never a reference to a local.
+            bbs::ThreadManager *thread_manager = &threads;
+            const auto ok = [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); };
+            // The wait lasts one buffer at 44.1 kHz: virtual time moves on by that
+            // much, so the game's sceKernelSetAlarm timers keep ticking.
+            const auto block_for = [thread_manager](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx,
+                                                    std::uint32_t samples) {
+                if (psphost::deliver_alarms(ctx, static_cast<std::uint64_t>(samples) * 1'000'000u / 44'100u)) return;
+                thread_manager->wait_like_delay(rt, ctx);
+            };
+            const auto block = [channels, block_for](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                const std::uint32_t ch = ctx.gpr[4u];
+                block_for(rt, ctx, ch < 8u ? (*channels)[ch].samples : 0u);
+            };
+            const auto block_output2 = [channels, block_for](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                block_for(rt, ctx, (*channels)[8].samples);
+            };
+            runtime.register_hle("sceAudio", 0x5EC81C55u,   // sceAudioChReserve(ch, samples, format)
+                [channels](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                    auto ch = static_cast<std::int32_t>(ctx.gpr[4u]);
+                    const std::uint32_t samples = ctx.gpr[5u];
+                    if (samples == 0u || samples > 0xFFC0u || (samples & 63u) != 0u) { ctx.set_gpr(2u, 0x80260005u); return; }
+                    if (ch < 0) {
+                        for (std::int32_t i = 7; i >= 0; --i) if (!(*channels)[i].reserved) { ch = i; break; }
+                        if (ch < 0) { ctx.set_gpr(2u, 0x80260002u); return; }
+                    }
+                    if (ch > 7) { ctx.set_gpr(2u, 0x80260003u); return; }
+                    if ((*channels)[ch].reserved) { ctx.set_gpr(2u, 0x80260002u); return; }
+                    (*channels)[ch] = AudioChannel{true, samples};
+                    ctx.set_gpr(2u, static_cast<std::uint32_t>(ch));
+                });
+            runtime.register_hle("sceAudio", 0x6FC46853u,   // sceAudioChRelease(ch)
+                [channels](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                    const std::uint32_t ch = ctx.gpr[4u];
+                    if (ch > 7u) { ctx.set_gpr(2u, 0x80260003u); return; }
+                    if (!(*channels)[ch].reserved) { ctx.set_gpr(2u, 0x80260008u); return; }
+                    (*channels)[ch] = AudioChannel{};
+                    ctx.set_gpr(2u, 0u);
+                });
+            runtime.register_hle("sceAudio", 0xCB2E439Eu,   // sceAudioSetChannelDataLen(ch, samples)
+                [channels](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                    const std::uint32_t ch = ctx.gpr[4u];
+                    if (ch > 7u) { ctx.set_gpr(2u, 0x80260003u); return; }
+                    (*channels)[ch].samples = ctx.gpr[5u];
+                    ctx.set_gpr(2u, 0u);
+                });
+            runtime.register_hle("sceAudio", 0xE2D56B2Du,   // sceAudioOutputPanned (non-blocking)
+                [channels](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                    const std::uint32_t ch = ctx.gpr[4u];
+                    ctx.set_gpr(2u, ch > 7u ? 0x80260003u : (*channels)[ch].samples);
+                });
+            runtime.register_hle("sceAudio", 0x136CAF51u, block);   // sceAudioOutputBlocking
+            runtime.register_hle("sceAudio", 0x13F592BCu, block);   // sceAudioOutputPannedBlocking
+            runtime.register_hle("sceAudio", 0x2D53F36Eu, block_output2);   // sceAudioOutput2OutputBlocking
+            runtime.register_hle("sceAudio", 0xB011922Fu, ok);      // sceAudioGetChannelRestLength: 0 = drained
+            runtime.register_hle("sceAudio", 0x95FD0C2Du, ok);      // sceAudioChangeChannelConfig
+            runtime.register_hle("sceAudio", 0xB7E1D8E7u, ok);      // sceAudioChangeChannelVolume
+            runtime.register_hle("sceAudio", 0x01562BA3u,   // sceAudioOutput2Reserve(samples): one argument
+                [channels](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                    const std::uint32_t samples = ctx.gpr[4u] & 0x7FFFFFFFu;
+                    if (samples < 17u || samples > 4111u) { ctx.set_gpr(2u, 0x80000104u); return; }
+                    if ((*channels)[8].reserved) { ctx.set_gpr(2u, 0x80268002u); return; }
+                    (*channels)[8] = AudioChannel{true, samples};
+                    ctx.set_gpr(2u, 0u);
+                });
+            runtime.register_hle("sceAudio", 0x43196845u,   // sceAudioOutput2Release
+                [channels](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                    (*channels)[8] = AudioChannel{};
+                    ctx.set_gpr(2u, 0u);
+                });
+            runtime.register_hle("sceAudio", 0x647CEF33u, ok);      // sceAudioOutput2GetRestSample: 0 = drained
+            runtime.register_hle("sceAudio", 0x63F2889Cu,   // sceAudioOutput2ChangeLength(samples)
+                [channels](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                    (*channels)[8].samples = ctx.gpr[4u] & 0x7FFFFFFFu;
+                    ctx.set_gpr(2u, 0u);
+                });
+        }
+        // BRINGUP SHIM: sceSasCore (the PSP's voice mixer) without sound: every
+        // voice reads as ended, __sceSasCore writes one grain of silence.
+        {
+            struct SasState { std::uint32_t grain = 256u; std::uint32_t output_mode = 0u; };
+            auto sas = std::make_shared<SasState>();
+            const auto ok = [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); };
+            runtime.register_hle("sceSasCore", 0x42778A9Fu,   // __sceSasInit(core, grain, voices, mode, rate)
+                [sas](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                    const std::uint32_t grain = ctx.gpr[5u];
+                    if (grain < 0x40u || grain > 0x800u || (grain & 0x1Fu) != 0u) { ctx.set_gpr(2u, 0x80420001u); return; }
+                    sas->grain = grain;
+                    sas->output_mode = ctx.gpr[7u];
+                    ctx.set_gpr(2u, 0u);
+                });
+            runtime.register_hle("sceSasCore", 0xA3589D81u,   // __sceSasCore(core, out): grain stereo s16
+                [sas](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                    const std::uint32_t out = ctx.gpr[5u];
+                    const std::uint32_t bytes = sas->grain * (sas->output_mode == 0u ? 4u : 2u);
+                    if (out != 0u && rt.memory().contains(out, bytes)) rt.memory().zero(out, bytes);
+                    ctx.set_gpr(2u, 0u);
+                });
+            runtime.register_hle("sceSasCore", 0x50A14DFCu, ok);     // __sceSasCoreWithMix: mixing silence leaves it as is
+            runtime.register_hle("sceSasCore", 0x68A46B95u,          // __sceSasGetEndFlag: all 32 voices ended
+                [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0xFFFFFFFFu); });
+            runtime.register_hle("sceSasCore", 0x2C8E6AB3u, ok);     // __sceSasGetPauseFlag: none paused
+            runtime.register_hle("sceSasCore", 0x74AE582Au, ok);     // __sceSasGetEnvelopeHeight: 0
+            runtime.register_hle("sceSasCore", 0x07F58C24u,          // __sceSasGetAllEnvelopeHeights(core, heights[32])
+                [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                    const std::uint32_t heights = ctx.gpr[5u];
+                    if (heights != 0u && rt.memory().contains(heights, 32u * 4u)) rt.memory().zero(heights, 32u * 4u);
+                    ctx.set_gpr(2u, 0u);
+                });
+            runtime.register_hle("sceSasCore", 0xBD11B7C2u,          // __sceSasGetGrain
+                [sas](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, sas->grain); });
+            runtime.register_hle("sceSasCore", 0xD1E0A01Eu,          // __sceSasSetGrain(core, grain)
+                [sas](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { sas->grain = ctx.gpr[5u]; ctx.set_gpr(2u, 0u); });
+            runtime.register_hle("sceSasCore", 0xE175EF66u,          // __sceSasGetOutputmode
+                [sas](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, sas->output_mode); });
+            runtime.register_hle("sceSasCore", 0xE855BF76u,          // __sceSasSetOutputmode(core, mode)
+                [sas](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { sas->output_mode = ctx.gpr[5u]; ctx.set_gpr(2u, 0u); });
+            // Voice and reverb settings: accepted, nothing plays.
+            for (const std::uint32_t nid : {0xD5A229C9u, 0x267A6DD2u, 0x33D4AB37u, 0xF983B186u, 0x019B25EBu, 0x9EC3676Au,
+                                            0xA0CF2FA4u, 0x76F01ACAu, 0xB7660A23u, 0x787D04D5u, 0xAD84D37Fu, 0xCBCD4F79u,
+                                            0x5F9529F6u, 0x99944089u, 0x440CA7D8u, 0xE1CD9561u})
+                runtime.register_hle("sceSasCore", nid, ok);
+        }
+        // BRINGUP SHIM: sceAtrac3plus (music) without sound: IDs are handed out,
+        // every decode returns no samples with the end flag set.
+        {
+            auto atrac_used = std::make_shared<std::array<bool, 6>>();
+            const auto ok = [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); };
+            const auto store_if = [](psprecomp::Runtime &rt, std::uint32_t address, std::uint32_t value) {
+                if (address != 0u && rt.memory().contains(address, 4u)) rt.memory().store32(address, value);
+            };
+            const auto get_id = [atrac_used](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                for (std::uint32_t id = 0u; id < atrac_used->size(); ++id)
+                    if (!(*atrac_used)[id]) { (*atrac_used)[id] = true; ctx.set_gpr(2u, id); return; }
+                ctx.set_gpr(2u, 0x80630006u); // no free ID
+            };
+            runtime.register_hle("sceAtrac3plus", 0x132F1ECAu, ok);       // sceAtracReinit
+            runtime.register_hle("sceAtrac3plus", 0x7A20E7AFu, get_id);   // sceAtracSetDataAndGetID
+            runtime.register_hle("sceAtrac3plus", 0x0FAE370Eu, get_id);   // sceAtracSetHalfwayBufferAndGetID
+            runtime.register_hle("sceAtrac3plus", 0x61EB33F5u,            // sceAtracReleaseAtracID(id)
+                [atrac_used](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                    const std::uint32_t id = ctx.gpr[4u];
+                    if (id >= atrac_used->size()) { ctx.set_gpr(2u, 0x80630005u); return; }
+                    (*atrac_used)[id] = false;
+                    ctx.set_gpr(2u, 0u);
+                });
+            runtime.register_hle("sceAtrac3plus", 0x6A8C3CD5u,            // sceAtracDecodeData(id, out, *samples, *end, *remain)
+                [store_if](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                    store_if(rt, ctx.gpr[6u], 0u);
+                    store_if(rt, ctx.gpr[7u], 1u);
+                    store_if(rt, ctx.gpr[8u], 0u);
+                    ctx.set_gpr(2u, 0u);
+                });
+            runtime.register_hle("sceAtrac3plus", 0xA2BBA8BEu,            // sceAtracGetSoundSample(id, *end, *loopStart, *loopEnd)
+                [store_if](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                    store_if(rt, ctx.gpr[5u], 0u);
+                    store_if(rt, ctx.gpr[6u], 0xFFFFFFFFu);
+                    store_if(rt, ctx.gpr[7u], 0xFFFFFFFFu);
+                    ctx.set_gpr(2u, 0u);
+                });
+            runtime.register_hle("sceAtrac3plus", 0xD6A5F2F7u,            // sceAtracGetMaxSample(id, *max): ATRAC3+ frame
+                [store_if](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { store_if(rt, ctx.gpr[5u], 0x800u); ctx.set_gpr(2u, 0u); });
+            runtime.register_hle("sceAtrac3plus", 0xE88F759Bu,            // sceAtracGetInternalErrorInfo(id, *error)
+                [store_if](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { store_if(rt, ctx.gpr[5u], 0u); ctx.set_gpr(2u, 0u); });
+            runtime.register_hle("sceAtrac3plus", 0x868120B5u, ok);       // sceAtracSetLoopNum
+        }
         bbs::PartitionMemory partition_memory;
         bbs::DiscIo disc_io;
         // Raw UMD reads (umd1: + the LBN from sceIoGetstat) need the real disc image.
