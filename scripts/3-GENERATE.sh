@@ -17,9 +17,32 @@ if [ ! -x "$RECOMP" ] || [ -n "$(find "$RUNTIME/src" "$RUNTIME/tools/codegen_mai
     "$RUNTIME"/src/sha256.cpp -o "$RECOMP"
 fi
 
-say "Generating code (several minutes)"
-rm -rf "$GAME_DIR/generated.new"
-"$RECOMP" "$(native "$GAME_DIR/EBOOT.BIN.dec")" --auto "$(native "$GAME_DIR/generated.new")" $LOAD_BASE $UNIT_SIZE
-[ -f "$GAME_DIR/generated.new/generated_registry.cpp" ] || fail "the recompiler did not finish"
-rm -rf "$GAME_DIR/generated"; mv "$GAME_DIR/generated.new" "$GAME_DIR/generated"
-echo "OK: $(ls "$GAME_DIR"/generated/generated_unit_*.cpp | wc -l) units in game/generated. Next: bash scripts/4-BUILD-ANDROID.sh"
+# Whole-disc compile, after Recomp Compiler's PS1 flow: survey -> profile -> static code for every image -> report.
+# The main executable and the MODULE/*.ELF overlays call each other, so each side's calls become the other's seeds
+# and the two are regenerated until no new main-side seed appears (normally 2 rounds).
+DISC=$GAME_DIR/disc-files
+say "Surveying the disc"
+"$PYTHON" -I "$(native "$REPO/scripts/wholedisc.py")" profile "$(native "$DISC")" "$(native "$GAME_DIR/EBOOT.BIN.dec")" \
+  "$(native "$GAME_DIR/wholedisc.json")"
+"$PYTHON" -I "$(native "$REPO/scripts/wholedisc.py")" main-pointers "$(native "$GAME_DIR/EBOOT.BIN.dec")" \
+  "$(native "$GAME_DIR/wholedisc.json")" "$(native "$GAME_DIR/overlay_seeds.txt")"
+: > "$GAME_DIR/main_seeds.txt"
+for round in 1 2 3; do
+  say "Round $round: overlays (seconds)"
+  PSPRECOMP_SEED_PROLOGUES=1 PSPRECOMP_SEED_CODE_POINTERS=1 PSPRECOMP_EXTRA_SEEDS="$(native "$GAME_DIR/overlay_seeds.txt")" \
+    bash "$REPO/scripts/gen-overlays.sh" "$RECOMP" "$DISC/PSP_GAME/USRDIR/MODULE" "$GAME_DIR/overlays"
+  if [ -f "$GAME_DIR/generated/generated_registry.cpp" ] && cmp -s "$GAME_DIR/overlays/main_seeds.txt" "$GAME_DIR/main_seeds.txt"; then
+    break
+  fi
+  cp "$GAME_DIR/overlays/main_seeds.txt" "$GAME_DIR/main_seeds.txt"
+  say "Round $round: main executable (several minutes)"
+  rm -rf "$GAME_DIR/generated.new"
+  PSPRECOMP_EXTRA_SEEDS="$(native "$GAME_DIR/main_seeds.txt")" \
+    "$RECOMP" "$(native "$GAME_DIR/EBOOT.BIN.dec")" --auto "$(native "$GAME_DIR/generated.new")" $LOAD_BASE $UNIT_SIZE
+  [ -f "$GAME_DIR/generated.new/generated_registry.cpp" ] || fail "the recompiler did not finish"
+  rm -rf "$GAME_DIR/generated"; mv "$GAME_DIR/generated.new" "$GAME_DIR/generated"
+done
+mkdir -p "$REPO/build"
+"$PYTHON" -I "$(native "$REPO/scripts/wholedisc.py")" report "$(native "$GAME_DIR/wholedisc.json")" \
+  "$(native "$GAME_DIR/generated")" "$(native "$GAME_DIR/overlays")" "$(native "$REPO/build/wholedisc-report.txt")"
+echo "OK: $(ls "$GAME_DIR"/generated/generated_unit_*.cpp | wc -l) units in game/generated, overlays in game/overlays; report in build/wholedisc-report.txt. Next: bash scripts/4-BUILD-PC.sh or 5-BUILD-ANDROID.sh"

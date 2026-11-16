@@ -102,6 +102,21 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeS
     const std::string dir = str(files_dir);
     // vcs::initialize_vcs_configuration reads VCSNative.ini beside argv[0]; the Java side writes it to files/.
     setenv("PSPRECOMP_CONFIG", (dir + "/VCSNative.ini").c_str(), 0);
+    // Optional debug switches: files/env.txt, one KEY=VALUE per line (push it with adb).
+    const std::string eboot_path = str(eboot);
+    const std::string env_file = eboot_path.substr(0, eboot_path.find_last_of('/') + 1) + "env.txt";
+    if (FILE *f = std::fopen(env_file.c_str(), "r")) {
+        char line[512];
+        while (std::fgets(line, sizeof line, f)) {
+            std::string l = line;
+            while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
+            const auto eq = l.find('=');
+            if (eq == std::string::npos || l[0] == '#') continue;
+            setenv(l.substr(0, eq).c_str(), l.substr(eq + 1).c_str(), 1);
+            std::cout << "[bbs-android] env " << l << std::endl;
+        }
+        std::fclose(f);
+    }
     auto *game = new GameArgs{{dir + "/bbs", str(eboot), str(disc), std::to_string(max_dispatches)}};
     pthread_attr_t attr;
     pthread_attr_init(&attr);

@@ -440,6 +440,9 @@ void DiscIo::getstat(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ct
         const std::filesystem::path native = runtime.translate_path(psp_path);
         std::error_code error;
         if (!std::filesystem::is_regular_file(native, error) || error) {
+            if (std::getenv("PSPRECOMP_IO_TRACE") != nullptr)
+                std::cerr << "[io-getstat] \"" << psp_path << "\" -> " << native.string() << " NOT FOUND ("
+                          << error.message() << ")\n";
             ctx.set_gpr(2u, kIoErrorNotFound); return;
         }
         const auto size = std::filesystem::file_size(native, error);

@@ -30,6 +30,7 @@ set(VCS "${RT}/profiles/vcs/host")
 set(HS "${RT}/host-shared")
 # Generated from your own disc by scripts/1-3 (never committed).
 set(BBS_GENERATED_DIR "${BBS_REPO}/game/generated" CACHE PATH "BBS generated code (scripts/3-GENERATE.sh)")
+set(BBS_OVERLAY_DIR "${BBS_REPO}/game/overlays" CACHE PATH "BBS recompiled MODULE/*.ELF overlays (scripts/gen-overlays.sh)")
 set(BBS_GENERATED_OPT "-O1" CACHE STRING "Optimization flag for the generated units")
 set(PSP_PYTHON "python" CACHE FILEPATH "Python 3 for embed_spirv.py")
 set(PSP_GLSLC "" CACHE FILEPATH "glslc (NDK shader-tools)")
@@ -66,11 +67,16 @@ set(HOST_SOURCES
     ${VCS}/framebuffer_capture.cpp ${GE_RENDERER_PATCHED} ${VCS}/ge_gpu_backend_vulkan.cpp ${VCS}/vcs_config.cpp
     ${VCS}/vcs_fps_overlay.cpp ${VCS}/vcs_project2dfx.cpp ${VCS}/vcs_project2dfx_lights.cpp
     ${VCS}/vcs_draw_distance_patch.cpp ${VCS}/vcs_runtime_log.cpp
-    ${BBS_REPO}/host/main.cpp ${BBS_REPO}/host/disc_io.cpp
+    ${BBS_REPO}/host/main.cpp ${BBS_REPO}/host/disc_io.cpp ${BBS_REPO}/host/savedata.cpp ${BBS_REPO}/host/overlays.cpp ${BBS_REPO}/host/movie_skip.cpp
     ${BBS_REPO}/host/thread_manager.cpp ${BBS_REPO}/host/partition_memory.cpp
     jni/bbs_jni.cpp)
 
-add_library(bbs SHARED ${HOST_SOURCES} "${BBS_GENERATED_DIR}/generated_registry.cpp" ${BBS_GENERATED_UNITS})
+file(GLOB BBS_OVERLAY_UNITS CONFIGURE_DEPENDS "${BBS_OVERLAY_DIR}/*/generated_*.cpp")
+if(NOT EXISTS "${BBS_OVERLAY_DIR}/overlays_registry.cpp")
+    message(FATAL_ERROR "No overlays in ${BBS_OVERLAY_DIR}: run scripts/3-GENERATE.sh")
+endif()
+add_library(bbs SHARED ${HOST_SOURCES} "${BBS_GENERATED_DIR}/generated_registry.cpp" ${BBS_GENERATED_UNITS}
+    "${BBS_OVERLAY_DIR}/overlays_registry.cpp" ${BBS_OVERLAY_UNITS})
 add_dependencies(bbs bbs_spirv)
 target_compile_definitions(bbs PRIVATE VCS_VULKAN_GE_BACKEND)
 target_include_directories(bbs PRIVATE "${RT}/include" "${VCS}" "${HS}" "${BBS_REPO}/host"
@@ -79,7 +85,7 @@ target_compile_options(bbs PRIVATE -w -fexceptions -frtti)
 # BBS's main() becomes bbs_main(), called from the JNI game thread.
 set_source_files_properties(${BBS_REPO}/host/main.cpp PROPERTIES COMPILE_DEFINITIONS "main=bbs_main")
 set_source_files_properties(${HOST_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2")
-set_source_files_properties(${BBS_GENERATED_UNITS} "${BBS_GENERATED_DIR}/generated_registry.cpp"
+set_source_files_properties(${BBS_GENERATED_UNITS} ${BBS_OVERLAY_UNITS} "${BBS_GENERATED_DIR}/generated_registry.cpp"
     PROPERTIES COMPILE_OPTIONS "${BBS_GENERATED_OPT};-g0")
 target_link_libraries(bbs PRIVATE vulkan android log)
 target_link_options(bbs PRIVATE -Wl,--gc-sections -Wl,-z,max-page-size=16384)

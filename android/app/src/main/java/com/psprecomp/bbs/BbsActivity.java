@@ -18,11 +18,15 @@ import java.io.FileOutputStream;
  * Birth by Sleep bring-up shell (2026-11-16): a full-screen SurfaceView whose ANativeWindow goes to the
  * Vulkan GE backend; the game runs on a native thread (libbbs.so). Game data is pushed with adb into
  * /sdcard/Android/data/com.psprecomp.bbs/files/ (EBOOT.BIN.dec + disc-files/).
- * Touch: any tap holds CROSS + CIRCLE (passes the auto-save notice's OK).
+ * Controls: on-screen pad (TouchPad: D-pad left, face buttons right, START/SELECT, L/R) and any
+ * Bluetooth/USB gamepad (onKeyDown/onKeyUp).
  */
 public class BbsActivity extends Activity implements SurfaceHolder.Callback {
     private static final String TAG = "BBS";
-    static final int PSP_CIRCLE = 0x2000, PSP_CROSS = 0x4000;
+    static final int PSP_SELECT = 0x1, PSP_START = 0x8, PSP_UP = 0x10, PSP_RIGHT = 0x20, PSP_DOWN = 0x40,
+            PSP_LEFT = 0x80, PSP_L = 0x100, PSP_R = 0x200, PSP_TRIANGLE = 0x1000, PSP_CIRCLE = 0x2000,
+            PSP_CROSS = 0x4000, PSP_SQUARE = 0x8000;
+    private int touchButtons, keyButtons;
 
     static { System.loadLibrary("bbs"); }
 
@@ -38,7 +42,10 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         SurfaceView view = new SurfaceView(this);
         view.getHolder().addCallback(this);
-        setContentView(view);
+        android.widget.FrameLayout root = new android.widget.FrameLayout(this);
+        root.addView(view);
+        root.addView(new TouchPad(this, b -> { touchButtons = b; nativeSetButtons(touchButtons | keyButtons); }));
+        setContentView(root);
         hideSystemBars();
     }
 
@@ -85,17 +92,35 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
         nativeSetSurface(null);
     }
 
-    @Override
-    public boolean onTouchEvent(MotionEvent e) {
-        switch (e.getActionMasked()) {
-            case MotionEvent.ACTION_DOWN:
-                nativeSetButtons(PSP_CROSS | PSP_CIRCLE);
-                return true;
-            case MotionEvent.ACTION_UP:
-            case MotionEvent.ACTION_CANCEL:
-                nativeSetButtons(0);
-                return true;
+    private static int keyToPsp(int code) {
+        switch (code) {
+            case android.view.KeyEvent.KEYCODE_DPAD_UP: return PSP_UP;
+            case android.view.KeyEvent.KEYCODE_DPAD_DOWN: return PSP_DOWN;
+            case android.view.KeyEvent.KEYCODE_DPAD_LEFT: return PSP_LEFT;
+            case android.view.KeyEvent.KEYCODE_DPAD_RIGHT: return PSP_RIGHT;
+            case android.view.KeyEvent.KEYCODE_BUTTON_A: return PSP_CROSS;
+            case android.view.KeyEvent.KEYCODE_BUTTON_B: return PSP_CIRCLE;
+            case android.view.KeyEvent.KEYCODE_BUTTON_X: return PSP_SQUARE;
+            case android.view.KeyEvent.KEYCODE_BUTTON_Y: return PSP_TRIANGLE;
+            case android.view.KeyEvent.KEYCODE_BUTTON_L1: return PSP_L;
+            case android.view.KeyEvent.KEYCODE_BUTTON_R1: return PSP_R;
+            case android.view.KeyEvent.KEYCODE_BUTTON_START: return PSP_START;
+            case android.view.KeyEvent.KEYCODE_BUTTON_SELECT: return PSP_SELECT;
+            default: return 0;
         }
-        return super.onTouchEvent(e);
+    }
+
+    @Override
+    public boolean onKeyDown(int code, android.view.KeyEvent e) {
+        int b = keyToPsp(code);
+        if (b == 0) return super.onKeyDown(code, e);
+        keyButtons |= b; nativeSetButtons(touchButtons | keyButtons); return true;
+    }
+
+    @Override
+    public boolean onKeyUp(int code, android.view.KeyEvent e) {
+        int b = keyToPsp(code);
+        if (b == 0) return super.onKeyUp(code, e);
+        keyButtons &= ~b; nativeSetButtons(touchButtons | keyButtons); return true;
     }
 }

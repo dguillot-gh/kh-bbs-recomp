@@ -4,6 +4,9 @@
 #include "partition_memory.hpp"
 #include "thread_manager.hpp"
 #include "disc_io.hpp"
+#include "savedata.hpp"
+#include "overlays.hpp"
+#include "movie_skip.hpp"
 #include "display_state.hpp"
 #include "ge_display.hpp"
 #include "interrupts.hpp"
@@ -128,6 +131,14 @@ int main(int argc, char **argv) {
             [&compiler_version](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
                 compiler_version = ctx.gpr[4u];
                 ctx.set_gpr(2u, 0u);
+            });
+        runtime.register_hle("Kernel_Library", 0xA089ECA4u,   // sceKernelMemset(dest, byte, size) -> dest
+            [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                const std::uint32_t dest = ctx.gpr[4u], size = ctx.gpr[6u];
+                const auto value = static_cast<std::uint8_t>(ctx.gpr[5u]);
+                if (size != 0u && rt.memory().contains(dest, size))
+                    for (std::uint32_t i = 0; i < size; ++i) rt.memory().store8(dest + i, value);
+                ctx.set_gpr(2u, dest);
             });
         runtime.register_hle("Kernel_Library", 0x092968F4u,
             [&interrupt_state](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
@@ -428,7 +439,15 @@ int main(int argc, char **argv) {
             const std::uint32_t timestamp = static_cast<std::uint32_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count());
-            const std::uint32_t pressed = g_bbs_pad_buttons.load(std::memory_order_relaxed);
+            std::uint32_t pressed = g_bbs_pad_buttons.load(std::memory_order_relaxed);
+            // PSPRECOMP_AUTOPAD=1 (testing without hands): every 2 s press LEFT, then CROSS, which answers the
+            // boot notices ("No system data... Proceed?" defaults to No) and starts the title screen.
+            static const bool autopad = std::getenv("PSPRECOMP_AUTOPAD") != nullptr;
+            if (autopad) {
+                const std::uint32_t t = psphost::vblank_count() % 120u;
+                if (t < 8u) pressed |= 0x0080u;                   // LEFT
+                else if (t >= 40u && t < 48u) pressed |= 0x4000u;  // CROSS
+            }
             const std::uint32_t buttons = negative ? ~pressed : pressed;
             for (std::uint32_t index = 0u; index < count; ++index) {
                 const std::uint32_t sample = destination + index * sample_size;
@@ -567,10 +586,29 @@ int main(int argc, char **argv) {
             [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
                 ctx.set_gpr(2u, ctx.gpr[4u] == 0u ? 0u : 0x80000107u);
             });
+        runtime.register_hle("sceSuspendForUser", 0x090CCB3Fu,   // sceKernelPowerTick: keeps the PSP awake (movies)
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
         runtime.register_hle("sceSuspendForUser", 0xEADB1BD7u,   // sceKernelVolatileMemIsLocked
             [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
                 ctx.set_gpr(2u, ctx.gpr[4u] == 0u ? 0u : 0x80000107u);
             });
+        bbs::register_savedata_hle(runtime);
+        bbs::register_movie_skip(runtime);   // sceMpeg (host/movie_skip.cpp)
+        runtime.register_hle("UtilsForUser", 0xC2DF770Eu,   // sceKernelIcacheInvalidateRange
+            [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                // The game copied code (an overlay): drop the functions compiled for what was there before.
+                bbs::overlays_code_changed(rt, ctx.gpr[4u], ctx.gpr[5u]);
+                ctx.set_gpr(2u, 0u);
+            });   // sceUtilitySavedata* (host/savedata.cpp)
+        for (const std::uint32_t nid : {0xEBD177D6u /* scePowerSetClockFrequency */,
+                                        0x737486F2u /* scePowerSetClockFrequency (alias) */,
+                                        0x843FBF43u /* scePowerSetCpuClockFrequency */,
+                                        0xB8D7B3FBu /* scePowerSetBusClockFrequency */}) {
+            runtime.register_hle("scePower", nid,   // CPU/bus clock: the host runs at its own speed
+                [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
+        }
+        runtime.register_hle("sceUtility", 0xE49BFE92u,   // sceUtilityUnloadModule: pairs with LoadModule below
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
         runtime.register_hle("sceUtility", 0x2A2B3DE0u,
             [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
                 // The bring-up runtime provides the game executable's imports
@@ -655,6 +693,7 @@ int main(int argc, char **argv) {
             throw psprecomp::Error("BBS ELF leaves no safe user-memory arena");
 
         psprecomp::register_generated_functions(runtime);
+        bbs::install_overlays(runtime);
 #if defined(PSPRECOMP_HAS_KJFS_MODULE)
         // Generated AOT functions replace PRX instruction execution, but the
         // PRX's relocated data/BSS still has to live in guest memory. KJFS

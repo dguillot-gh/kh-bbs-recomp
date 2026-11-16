@@ -80,6 +80,9 @@ list(APPEND PSP_VCS_RENDERER_SOURCES
 add_executable(BBSBringup
     host/main.cpp
     host/disc_io.cpp
+    host/savedata.cpp
+    host/overlays.cpp
+    host/movie_skip.cpp
     host/thread_manager.cpp
     host/partition_memory.cpp
     ${PSP_VCS_RENDERER_SOURCES}

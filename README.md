@@ -1,4 +1,4 @@
-# bbs-recomp
+# kh-bbs-recomp
 
 A native port of **Kingdom Hearts: Birth by Sleep** (PSP) to Android phones and Windows PCs, made by *static
 recompilation*: the game's own MIPS (Allegrex) code is translated to C++ ahead of time and compiled for your device,
@@ -10,9 +10,22 @@ included as the `runtime/` submodule.
 > ISO, decrypt and recompile its executable on your PC, and nothing made from it is ever committed or shared. Please
 > don't share your builds (the APK and the game folder contain the game).
 
-**Status: early bring-up.** It boots to the first screen (the auto-save notice) on PC, through the software or the
-Vulkan renderer. On Android it builds, installs and starts on Vulkan; reaching that first screen on the phone is the
-current work. Sound is silent for now; menus and gameplay are not reached yet. See `NOTES.md` for the detailed log.
+**Status: early, but playing.** On Android (Vulkan) it boots through the notices and save-data prompt, the title
+screen and main menu, loads the first world and starts its in-engine cutscene. The whole disc is recompiled: the
+main executable and the nine `MODULE/*.ELF` code overlays, which are swapped in as the game loads them. Movies are
+skipped and there is no sound yet (see To do). See `NOTES.md` for the detailed log.
+
+**To do:**
+- **Install script:** `6-INSTALL-PHONE.sh` copies `EBOOT.BIN.dec` and `disc-files/` only. The game also needs the
+  ISO (it reads `BBS0-4.DAT` as raw disc sectors) and offline-decrypted `decrypted/BBS1-3.DAT` (PGD) beside them,
+  and no script makes those yet. Files pushed with adb also need their permissions opened for the app.
+- **Movies (FFmpeg):** intro and cut-scene movies are skipped (`host/movie_skip.cpp` reports the stream as finished).
+  Real playback needs a minimal FFmpeg build (H.264 video + ATRAC3plus audio, as the runtime's VCS profile uses)
+  for Windows and Android, and an `sceMpeg` player; portable-ops-native's `hle_mpeg.cpp` is the model.
+- **Audio:** no sound output yet. Needs an Android output (AAudio) and a Windows one behind `sceAudio`, plus ATRAC3plus
+  decoding for the game's sound (same FFmpeg build).
+- **HD ReMix:** support [Birth-by-Sleep-HD-ReMix](https://github.com/AkiraJkr/Birth-by-Sleep-HD-ReMix) (the
+  community HD texture/asset mod) once the game plays; to be looked at, not yet evaluated.
 
 ## Supported dump
 
@@ -28,8 +41,8 @@ You need **Git** (Git Bash on Windows), **Python 3**, a **clang** (on Windows: [
 and for Android: the **Android SDK** (build-tools 36.0.0, platforms;android-35, cmake 3.31), **NDK r29** and **JDK 17+**.
 
 ```bash
-git clone --recurse-submodules https://github.com/dguillot-gh/bbs-recomp.git
-cd bbs-recomp
+git clone --recurse-submodules https://github.com/dguillot-gh/kh-bbs-recomp.git
+cd kh-bbs-recomp
 bash scripts/1-EXTRACT.sh "/path/to/Kingdom Hearts - Birth by Sleep (USA).iso"   # checks the dump, extracts it
 bash scripts/2-DECRYPT.sh        # builds the decrypter, decrypts EBOOT.BIN
 bash scripts/3-GENERATE.sh       # builds the recompiler, generates the C++ (several minutes)

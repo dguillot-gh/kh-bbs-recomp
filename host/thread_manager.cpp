@@ -79,6 +79,10 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
         [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { start_thread(rt, ctx); });
     runtime.register_hle("ThreadManForUser", 0x809CE29Bu,
         [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { exit_delete_thread(rt, ctx); });
+    // sceKernelExitThread(status): the same end as ExitDeleteThread here (that one also leaves the thread record,
+    // Completed, for WaitThreadEnd/DeleteThread). After BBS's intro movie. 2026-11-16.
+    runtime.register_hle("ThreadManForUser", 0xAA73C935u,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { exit_delete_thread(rt, ctx); });
     runtime.register_hle("ThreadManForUser", 0x278C0DF5u,
         [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { wait_thread_end(rt, ctx); });
     runtime.register_hle("ThreadManForUser", 0x840E8133u,   // sceKernelWaitThreadEndCB: same wait, callback-interruptible == same under cooperative HLE

@@ -36,14 +36,18 @@ fi
 
 say "Compiling the generated game code ($JOBS jobs; cached between runs)"
 compile_one() {
-  local f=$1 o=$OUT/gen/$(basename "$1" .cpp).o
+  local f=$1 o=$OUT/gen/$(basename "$(dirname "$1")")_$(basename "$1" .cpp).o
   if [ ! -f "$o" ] || [ "$f" -nt "$o" ]; then
     "$HOST_CXX" -std=c++20 -O1 -w -c $INC -I "$GEN" "$f" -o "$o" 2> "$o.err" || { echo "FAIL $f"; head -3 "$o.err"; }
   fi
 }
 export -f compile_one; export OUT HOST_CXX INC GEN
-ls "$GEN"/generated_unit_*.cpp "$GEN/generated_registry.cpp" | xargs -P "$JOBS" -I{} bash -c 'compile_one "$@"' _ {}
+OVL=$GAME_DIR/overlays
+rm -f "$OUT"/gen/generated_unit_*.o "$OUT"/gen/generated_registry.o  # object names before overlays (2026-11-16)
+[ -f "$OVL/overlays_registry.cpp" ] || fail "no overlays: run scripts/3-GENERATE.sh again"
+ls "$GEN"/generated_unit_*.cpp "$GEN/generated_registry.cpp" "$OVL"/*/generated_*.cpp | xargs -P "$JOBS" -I{} bash -c 'compile_one "$@"' _ {}
 
+"$HOST_CXX" -std=c++20 -O1 -w -c $INC -I "$REPO/host" "$OVL/overlays_registry.cpp" -o "$OUT/gen/overlays_registry.o"
 say "Compiling the engine and host"
 for f in "$REPO"/host/*.cpp; do
   "$HOST_CXX" -std=c++20 -O2 -w -c $INC -I "$REPO/host" -I "$GEN" "$f" -o "$OUT/host/$(basename "$f" .cpp).o"

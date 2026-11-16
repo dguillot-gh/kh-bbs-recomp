@@ -21,6 +21,7 @@ JDK=${JAVA_HOME:?set JAVA_HOME to a JDK 17+}
 PY=${PYTHON:-$(command -v python3 || command -v python || true)}
 [ -n "$PY" ] || { echo "set PYTHON to Python 3"; exit 1; }
 CORPUS=${CORPUS:-$REPO/game/generated}
+OVERLAYS=${OVERLAYS:-$(dirname "$CORPUS")/overlays}
 [ -f "$CORPUS/generated_registry.cpp" ] || { echo "no generated code in $CORPUS: run scripts/1-3 first"; exit 1; }
 BUILD=${BUILD_DIR:-$REPO/build/android}
 JOBS=${JOBS:-4}
@@ -47,7 +48,7 @@ if [ "$WHAT" != apk ]; then
     -DCMAKE_MAKE_PROGRAM="$(w "$NINJA")" \
     -DCMAKE_TOOLCHAIN_FILE="$(w "$NDK")/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DANDROID_STL=c++_static \
-    -DCMAKE_BUILD_TYPE=Release -DBBS_GENERATED_OPT="${OPT:--O1}" -DBBS_GENERATED_DIR="$(w "$CORPUS")" \
+    -DCMAKE_BUILD_TYPE=Release -DBBS_GENERATED_OPT="${OPT:--O1}" -DBBS_GENERATED_DIR="$(w "$CORPUS")" -DBBS_OVERLAY_DIR="$(w "$OVERLAYS")" \
     -DPSP_PYTHON="$(w "$PY")" -DPSP_GLSLC="$(w "$NDK")/shader-tools/$HOSTTAG/glslc$X"
   if [ "$X" = .exe ]; then lowprio "$(cygpath -w "$NINJA")" -C "$(cygpath -w "$BUILD")" -j "$JOBS" bbs
   else lowprio "$NINJA" -C "$BUILD" -j "$JOBS" bbs; fi
@@ -67,7 +68,7 @@ if [ "$WHAT" != lib ]; then
   "$BT/aapt2$X" link -o "$(w "$O/base.apk")" -I "$(w "$JAR")" \
     --manifest "$(w "$HERE/app/src/main/AndroidManifest.xml")" --min-sdk-version 26 --target-sdk-version 35 \
     --version-code 1 --version-name 0.1.0 --rename-manifest-package com.psprecomp.bbs
-  "$JDK/bin/javac$X" -source 17 -target 17 -nowarn -cp "$(w "$JAR")" \
+  "$JDK/bin/javac$X" -source 17 -target 17 -nowarn -encoding UTF-8 -cp "$(w "$JAR")" \
     -d "$(w "$O/classes")" $(find "$HERE/app/src/main/java" -name '*.java' | while read f; do w "$f"; done)
   "$JDK/bin/java$X" -cp "$(w "$BT/lib/d8.jar")" com.android.tools.r8.D8 --release --min-api 26 \
     --lib "$(w "$JAR")" --output "$(w "$O/dex")" \
