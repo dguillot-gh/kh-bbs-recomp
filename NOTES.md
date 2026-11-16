@@ -7,6 +7,92 @@ Build and run from the workspace root: `.\psp.ps1 -Game bbs -Stage regen|build|r
 Inputs (local only): `extracted\KingdomHeartsBirthBySleep\` (`decrypted\EBOOT.BIN.dec`,
 `disc-files\`, corpus `generated-psprecomp-fixed32k\`, or `generated-v2\` after a regen).
 
+## Current: work-PC session 2026-11-16, part 5: Vulkan frames reach guest VRAM (auto-save notice visible)
+
+- **Fix:** shared `psphost::ge_display_present_gpu_frame(rt, fb, stride, format, vblank)` in
+  `psp-native-runtime\host-shared\ge_display.cpp/.hpp`, called from sceDisplaySetFrameBuf in `kh-bbs\host\main.cpp`
+  and `mgs-peace-walker\host\main.cpp`. No-op on the software path. With a GPU backend: set_display_framebuffer,
+  finish_color_frame(psphost::vblank_count()), and when it doesn't present directly, write the RGBA readback into
+  guest VRAM at the displayed buffer (565/5551/4444/8888, stride; point-sampled to 480x272) + capture_frame_if_requested.
+  Only the displayed buffer is written; other targets stay with the software rasterizer.
+- **BBS (generated-v3, Backend=Vulkan, NativeGE=true, cap 60M, 170 s):** 8 dumps, from frame_000028 on the same
+  auto-save notice as software frame_000020. Not pixel-exact: best frame differs in 15,745 of 130,560 pixels (mean
+  |diff| ~50 per pixel over RGB), all inside the dialog panel (x 57-422, y 49-224): the software path has a fine
+  dithered red pattern (~300 colours), Vulkan a smooth gradient (92 colours); text, icon, OK button match.
+- **PW smoke (Vulkan, v2 corpus, cap 20M):** builds and runs to the usual `Dispatch limit reached at 0x08B42A6C`;
+  `draws=262352 frames=0`, one black dump, i.e. unchanged. PW's GPU frames never finish (not investigated).
+- Files edited (part 5): psp-native-runtime\host-shared\ge_display.cpp, ge_display.hpp, kh-bbs\host\main.cpp,
+  mgs-peace-walker\host\main.cpp, GLES-BACKEND-PLAN.md.
+
+## Current: work-PC session 2026-11-16, part 4: FIRST PICTURE (software GE); black = Vulkan backend not written back
+
+- **Software backend shows real frames.** generated-v3 build, VCSNative.ini temporarily `Backend=Software` (restored to
+  Vulkan after), `PSPRECOMP_GE_FRAME_DUMP=1`, cap 60M, 170 s: 8 dumps; frame_000014..20 non-black (~73k non-zero
+  bytes, ~300 colours). frame_000020 = the red "INFORMATION: This game uses an auto-save feature..." dialog with an
+  OK button (PNG copy of the scratch dump looked at by eye).
+- **GE side is fine:** GE_DIAG: ~73k lists in 120 s, each `sceGeListEnQueue(list=0x09A7A900, stall=list)` then
+  UpdateStallAddr runs it and the finish callback 0x08A8D630 fires; SetFrameBuf alternates 0x04000000/0x04044000,
+  stride 512, format 1 (565), which is what the dump reads.
+- **Cause of the black dumps with Vulkan:** `ge_gpu_backend_vulkan.cpp` draws into its own GPU target and only
+  reads back/presents in its frame-finish path (report `frames=0`, `frame readback 0 MiB`), which VCS's display code
+  drives (vcs_profile.cpp ~7044) but the shared `host-shared\ge_display.cpp` / BBS SetFrameBuf path never calls. Guest
+  VRAM stays zero, so the dumps (which read guest VRAM) are black. Probably PW's black frames too (same shared GE path,
+  Vulkan ini) — check PW with Backend=Software.
+- **Proposed fix:** in ge_display (shared), on sceDisplaySetFrameBuf / list finish with the Vulkan backend, call the
+  backend's frame finish with the displayed FBP and copy its readback into guest VRAM (or dump from the readback).
+  Until then use Backend=Software for bring-up runs/dumps. Not implemented this session.
+- No code edited in part 4 (VCSNative.ini in %TEMP%\psp-clang-build-v3\bbs changed for one run and restored).
+
+## Current: work-PC session 2026-11-16, part 3: regen into generated-v3; frame loop runs, frames black
+
+- No codegen change needed: 0xD03C8080 (vi2uc) was already in `src\decoder.cpp` (10/29) and in the 11/03 clang
+  `psp_recomp.exe`. Regen (approved): `psp_recomp.exe EBOOT.BIN.dec --auto ...\generated-v3 0x08804000 0x8000`
+  (BELOWNORMAL). 113 units, 656,217 instructions (same as v2); "vfpu4 not lowered" 18 -> 4. Left: 0xD0238082 /
+  0xD0238004 (group 1 op 3, vrndf2) at 0x088583F8, 0x08858E80, 0x0886BD60, and 0xD0428080 (group 2 op 2, vbfy1)
+  at 0x08AF9950. Other unlowered counts unchanged (vfpu0 262, vfpu3 92, special 949, unknown 1290). generated-v2 kept.
+- Build: `clang-build.sh bbs ...\generated-v3` with CLANG_OUT=`%TEMP%\psp-clang-build-v3` (v2 objects kept).
+- Run (170 s, cap 400M): no stop. Frame loop: in 60 s ~28,450 FlipSema waits / FlipThread wakeups.
+  Only one frame dump (dumps keep changed frames), all pixels 0. Next: why the picture stays black (GE lists, draw
+  targets, framebuffer vs dump; compare PW's black frames).
+
+## Current: work-PC session 2026-11-16, part 2: FlipSema stall fixed; then VFPU 0xD03C8080 (vi2uc)
+
+- **Cause:** FlipThread (prio 16) is woken by the vblank handler 0x0880919C via 0x088C55B0 (CancelWakeup +
+  WakeupThread(5)); afterwards the handler clears the flip-request byte [0x08BD4A9C] (0x08809214). Our `wake_thread`
+  switched to FlipThread *inside the handler* (guest-call chain on RsrcBuilder). The handler's tail ran only when
+  RsrcBuilder next resumed, a frame later, after user_main had set the byte for frame 2; it cleared it, so FlipThread
+  was never woken again and user_main waited on FlipSema forever. ([0x08B5BD18] = FlipThread uid 5, set once at
+  0x088094E8: fine.) Evidence: PSPRECOMP_NO_CHAIN+TRACE with WATCH_WRITE on 0x08BD4A9C.
+- **Fix:** `psp-native-runtime\host-shared\guest_calls.cpp/.hpp`: new `psphost::in_guest_calls()` (additive, PW
+  unchanged); `kh-bbs\host\thread_manager.cpp` `wake_thread` does not preempt while the caller runs a guest-call chain
+  (PSP handlers run to completion). SignalSema etc. from a handler may need the same rule later.
+- **Result on generated-v2:** past FlipSema, GE draws=108, then `Unsupported Allegrex instruction 0xD03C8080 at
+  0x08AF9210: vfpu4 not lowered yet`. 0xD03C8080 = VFPU4 group 1 op 28 = **vi2uc**, already decoded/lowered in
+  `src\decoder.cpp` since 10/29; generated-v2 (10/27) predates it. Regen into `generated-v3` (part 3 below).
+- Files edited (part 2): psp-native-runtime\host-shared\guest_calls.cpp, guest_calls.hpp, kh-bbs\host\thread_manager.cpp.
+
+## Current: work-PC session 2026-11-16 (clang): the 0x48 null-object crash is fixed; now stalls on FlipSema
+
+- **Cause of the 0x00000048 crash:** user_main (0x08A8BBB0..BC6C) loads group "common" (`0x08842344("SYS","common",1000,0)`),
+  waits for the busy byte 0x09F35630, then looks up "common" type 1 (`0x0883BA98` -> `0x0883DA0C`, per-type lists at
+  0x09F35388 + type*16). The lookup only accepts resource objects in state 7 (byte +9; check in 0x088378A8). common.arc
+  (obj 0x09A20CD0) went 2 -> 4 -> 7 -> **3**: RsrcBuilder (prio 21) runs the load job 0x08836E2C, which submits the read
+  (0x0880FDB0, completion callback 0x08837820), wakes AsyncFileAccess (prio 20) and *then* writes state 3 ("requested").
+  Our sceIoReadAsync + sceIoWaitAsyncCB completed inline, so Async did the whole read and set 7 before RsrcBuilder
+  resumed and overwrote it with 3. On a PSP the disc wait blocks Async, so 3 comes first. Same for FontEn/SeInfo/common_ex.
+  Found with PSPRECOMP_WATCH_WRITE on the object and PSPRECOMP_NO_CHAIN=1 PSPRECOMP_TRACE=1.
+- **Fix:** `host\disc_io.cpp/.hpp`: sceIoWaitAsync (0xE23EEC33) and WaitAsyncCB (0x35DBD746) call a hook after a
+  successful wait (PollAsync doesn't); `host\main.cpp` sets it to `ThreadManager::wait_like_delay`. The crash is gone.
+- **Also changed (shared, PW-safe, additive):** `psp-native-runtime\host-shared\interrupts.cpp/.hpp`: `psphost::vblank_count()`
+  counts every delivered vblank (virtual clock too); BBS sceDisplayGetVcount (main.cpp) now returns it (was bbs::vblank_count,
+  which only moved on vblank waits nobody makes). Did not unblock the next stop on its own.
+- **Next stop (no error, runs until timeout):** one frame dumped (0x04000000, all black), then user_main waits on sema
+  0x602 "FlipSema" after its second flip request (guest-call 0x08A8D630) and FlipThread is never woken again. Vblank
+  handler 0x0880919C wakes it only if `GetVcount - [0x08BD4A74] != 1`, `[0x08B5BD18] != 0` and byte `[0x08BD4A9C] != 0`;
+  next: watch those two globals (who should set them: GE finish/signal callback 0x08A8D630? sceGe list completion?).
+- Files edited: kh-bbs\host\disc_io.cpp, kh-bbs\host\disc_io.hpp, kh-bbs\host\main.cpp,
+  psp-native-runtime\host-shared\interrupts.cpp, psp-native-runtime\host-shared\interrupts.hpp. PW not rebuilt.
+
 ## Current: work-laptop session 2026-11-03 (clang; read first): first sceDisplaySetFrameBuf, then a null object
 
 Built with `psp-native-runtime\bringup\clang-build.sh bbs` (this laptop has no MSVC/CMake) on the 10/27

@@ -27,8 +27,13 @@ endif()
 set(PSPRECOMP_RUNTIME_DIR "" CACHE PATH
     "Path to the psp-native-runtime shared framework repo")
 if(NOT PSPRECOMP_RUNTIME_DIR)
-    get_filename_component(_parent "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
-    set(PSPRECOMP_RUNTIME_DIR "${_parent}/psp-native-runtime")
+    # The runtime/ submodule (git submodule update --init), else a sibling psp-native-runtime checkout.
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/runtime/CMakeLists.txt")
+        set(PSPRECOMP_RUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/runtime")
+    else()
+        get_filename_component(_parent "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+        set(PSPRECOMP_RUNTIME_DIR "${_parent}/psp-native-runtime")
+    endif()
 endif()
 if(NOT EXISTS "${PSPRECOMP_RUNTIME_DIR}/CMakeLists.txt")
     message(FATAL_ERROR

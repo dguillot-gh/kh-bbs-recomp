@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <map>
 #include <optional>
@@ -21,6 +22,12 @@ public:
     void set_iso(const std::filesystem::path &path);
     // Folder with offline-decrypted copies of PGD files, same file names.
     void set_decrypted_dir(const std::filesystem::path &path) { decrypted_dir_ = path; }
+    // Called after a successful blocking sceIoWaitAsync/WaitAsyncCB (not PollAsync):
+    // main sets it to a DelayThread-like wait, so the waiting thread gives the
+    // others a turn as a real disc read would (2026-11-16, see NOTES.md).
+    void set_async_wait_hook(std::function<void(psprecomp::Runtime &, psprecomp::AllegrexContext &)> hook) {
+        async_wait_hook_ = std::move(hook);
+    }
 
 private:
     // Raw = none: a host file. Block: the whole disc, seek/read counted in
@@ -60,7 +67,7 @@ private:
     // The async variants (open/close/read/write/seek-Async) complete inline on
     // this cooperative host; their result is kept per-fd for sceIoWaitAsync /
     // sceIoWaitAsyncCB / sceIoPollAsync (all: int (SceUID fd, SceInt64 *res)).
-    void wait_async(psprecomp::Runtime &, psprecomp::AllegrexContext &);
+    void wait_async(psprecomp::Runtime &, psprecomp::AllegrexContext &, bool blocking);
     void note_async_result(psprecomp::AllegrexContext &, bool fd_is_result);
 
     bool read_iso(std::uint64_t offset, char *out, std::size_t length);
@@ -77,6 +84,7 @@ private:
     std::optional<IsoEntry> iso_root_;
     std::map<std::string, IsoEntry> iso_cache_;
     std::filesystem::path decrypted_dir_;
+    std::function<void(psprecomp::Runtime &, psprecomp::AllegrexContext &)> async_wait_hook_;
 };
 
 } // namespace bbs

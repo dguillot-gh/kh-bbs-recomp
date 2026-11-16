@@ -2,6 +2,7 @@
 
 #include "display_state.hpp"
 #include "framebuffer_capture.hpp"
+#include "guest_calls.hpp"
 #include "interrupts.hpp"
 #include "psprecomp/common.hpp"
 
@@ -865,9 +866,11 @@ void ThreadManager::wake_thread(psprecomp::Runtime &runtime, std::int32_t uid,
         return;
     }
     enqueue(uid, found->second.context);
-    // A woken thread that outranks the caller runs now (like StartThread).
+    // A woken thread that outranks the caller runs now (like StartThread),
+    // except from an interrupt handler/callback, which runs to completion first
+    // (psphost::in_guest_calls; the woken thread runs at the next switch).
     const auto caller = threads_.find(current_uid_);
-    if (caller != threads_.end() && uid != current_uid_ &&
+    if (caller != threads_.end() && uid != current_uid_ && !psphost::in_guest_calls() &&
         found->second.priority < caller->second.priority) {
         psprecomp::AllegrexContext caller_context = ctx;
         caller_context.pc = ctx.gpr[31u];

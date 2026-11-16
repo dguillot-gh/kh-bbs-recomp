@@ -7,10 +7,13 @@
 #include "display_state.hpp"
 #include "ge_display.hpp"
 #include "interrupts.hpp"
+#include "ge_gpu_backend.hpp"
+#include "vcs_config.hpp"
 
 #include <cstdint>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <ctime>
 #include <cstdlib>
@@ -32,6 +35,10 @@ void register_kjfs_generated_functions(Runtime &runtime);
 void register_zlibdec_generated_functions(Runtime &runtime);
 #endif
 }
+
+// Host pad state (PSP button bits, sceCtrl layout). Set by a front end (Android touch, 2026-11-16);
+// stays 0 in the headless Windows bring-up, so sceCtrl reports no buttons as before.
+std::atomic<std::uint32_t> g_bbs_pad_buttons{0u};
 
 namespace {
 struct KjfsPendingReturn {
@@ -356,7 +363,11 @@ int main(int argc, char **argv) {
                 const auto now = std::chrono::system_clock::now();
                 const auto time = std::chrono::system_clock::to_time_t(now);
                 std::tm local{};
+#if defined(_WIN32)
                 localtime_s(&local, &time);
+#else
+                localtime_r(&time, &local);
+#endif
                 const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(
                     now.time_since_epoch()).count() % 1'000'000;
                 rt.memory().store16(output, static_cast<std::uint16_t>(local.tm_year + 1900));
@@ -404,7 +415,7 @@ int main(int argc, char **argv) {
                 ctx.set_gpr(2u, controller_sampling_cycle);
             });
         // sceCtrlReadBuffer*, copied from the VCS profile (vcs_profile.cpp 6449-6482)
-        // with the bring-up constants: no buttons, centered analog sticks.
+        // with centered analog sticks; buttons from g_bbs_pad_buttons (none unless a front end sets them).
         auto write_controller_samples = [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx, bool negative) {
             const std::uint32_t destination = ctx.gpr[4u];
             const std::uint32_t count = ctx.gpr[5u];
@@ -417,7 +428,8 @@ int main(int argc, char **argv) {
             const std::uint32_t timestamp = static_cast<std::uint32_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count());
-            const std::uint32_t buttons = negative ? ~0u : 0u;
+            const std::uint32_t pressed = g_bbs_pad_buttons.load(std::memory_order_relaxed);
+            const std::uint32_t buttons = negative ? ~pressed : pressed;
             for (std::uint32_t index = 0u; index < count; ++index) {
                 const std::uint32_t sample = destination + index * sample_size;
                 rt.memory().store32(sample, timestamp);
@@ -496,6 +508,9 @@ int main(int argc, char **argv) {
                 if (std::getenv("PSPRECOMP_DISPLAY_DIAG") != nullptr)
                     std::cerr << "[display] set-framebuf buffer=" << psprecomp::hex32(buffer)
                               << " stride=" << stride << " format=" << format << "\n";
+                // GPU GE backend: finish its frame and put the picture in guest VRAM
+                // (no-op on the software path). 2026-11-16.
+                psphost::ge_display_present_gpu_frame(rt, buffer, stride, format, psphost::vblank_count());
                 ctx.set_gpr(2u, 0u);
             });
         runtime.register_hle("sceDisplay", 0xEEDA2E54u,   // sceDisplayGetFrameBuf
@@ -519,7 +534,9 @@ int main(int argc, char **argv) {
             });
         runtime.register_hle("sceDisplay", 0x9C6EAAD7u,   // sceDisplayGetVcount
             [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
-                ctx.set_gpr(2u, static_cast<std::uint32_t>(bbs::vblank_count));
+                // Every delivered vblank (virtual clock too), not only the vblank
+                // waits (bbs::vblank_count): see psphost::vblank_count. 2026-11-16.
+                ctx.set_gpr(2u, static_cast<std::uint32_t>(psphost::vblank_count()));
             });
         runtime.register_hle("sceDisplay", 0xDBA6C4C4u,   // sceDisplayGetFramePerSec
             [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
@@ -923,6 +940,11 @@ int main(int argc, char **argv) {
         threads.set_heap_end_source([&partition_memory] { return partition_memory.high_watermark(); });
         partition_memory.install_hles(runtime);
         disc_io.install_hles(runtime);
+        // sceIoWaitAsync(CB) blocks like DelayThread (see DiscIo::wait_async).
+        // `threads` outlives the runtime: capture its address, not a local ref.
+        disc_io.set_async_wait_hook([thread_manager = &threads](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            thread_manager->wait_like_delay(rt, ctx);
+        });
         runtime.register_hle("ModuleMgrForUser", 0xD8B73127u,
             [main_module_ranges](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
                 const std::uint32_t address = ctx.gpr[4u];
@@ -994,8 +1016,28 @@ int main(int argc, char **argv) {
                   << "Functions:  " << runtime.function_count() << "\n"
                   << "Dispatch cap: " << max_dispatches << "\n";
 
+        // Optional GPU GE backend (2026-11-16): VCSNative.ini beside the exe, or PSPRECOMP_CONFIG,
+        // [Rendering] Backend=Vulkan (or DirectX12) + NativeGE=true. Without it the bit-exact software
+        // rasterizer draws everything, as before; ge_display's renderer feeds whichever backend is active.
+        vcs::initialize_vcs_configuration(std::filesystem::absolute(argv[0]).parent_path());
+        {
+            std::string gpu_error;
+            if (!vcs::initialize_ge_gpu_backend(gpu_error))
+                throw psprecomp::Error("GE GPU backend: " + gpu_error);
+            const vcs::GeGpuBackendReport gpu = vcs::ge_gpu_backend_report();
+            std::cout << "GE backend: requested=" << vcs::ge_gpu_backend_name(gpu.requested)
+                      << " active=" << vcs::ge_gpu_backend_name(gpu.active) << " (" << gpu.message << ")\n";
+        }
+
         // Unimplemented PSP imports stop the runtime and report their library/NID.
         runtime.run(elf.runtime_entry(), max_dispatches);
+        {
+            const vcs::GeGpuBackendReport gpu = vcs::ge_gpu_backend_report();
+            std::cout << "GE backend " << vcs::ge_gpu_backend_name(gpu.active) << ": draws=" << gpu.game_draw_calls
+                      << " frames=" << gpu.game_frames << " textured=" << gpu.textured_game_draw_calls
+                      << " targets=" << gpu.framebuffer_targets_observed << "\n";
+            vcs::shutdown_ge_gpu_backend();
+        }
         std::cout << "Compiled SDK version: " << compiled_sdk_version << "\n";
         std::cout << "Compiler version: " << compiler_version << "\n";
         std::cout << "Runtime stopped: " << runtime.stop_reason() << "\n";

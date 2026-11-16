@@ -71,12 +71,13 @@ void DiscIo::install_hles(psprecomp::Runtime &runtime) {
     // PSP SDK form for all three: int (SceUID fd, SceInt64 *res). Ops complete
     // inline on this cooperative host, so the stored per-fd result is final:
     // wait_async writes it as a sign-extended 64-bit value to *res and returns 0.
+    // WaitAsync/WaitAsyncCB block (async_wait_hook_); PollAsync never does.
     runtime.register_hle("IoFileMgrForUser", 0xE23EEC33u,
-        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { wait_async(rt, ctx); });
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { wait_async(rt, ctx, true); });
     runtime.register_hle("IoFileMgrForUser", 0x35DBD746u,
-        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { wait_async(rt, ctx); });
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { wait_async(rt, ctx, true); });
     runtime.register_hle("IoFileMgrForUser", 0x3251EA56u,
-        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { wait_async(rt, ctx); });
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) { wait_async(rt, ctx, false); });
     runtime.register_hle("IoFileMgrForUser", 0x27EB27B8u,   // sceIoLseek (64-bit)
         [this](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { seek(ctx, true); });
     runtime.register_hle("IoFileMgrForUser", 0x68963324u,   // sceIoLseek32
@@ -342,7 +343,7 @@ void DiscIo::note_async_result(psprecomp::AllegrexContext &ctx, bool fd_is_resul
     }
 }
 
-void DiscIo::wait_async(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) {
+void DiscIo::wait_async(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx, bool blocking) {
     // PSP SDK: int (SceUID fd, SceInt64 *res). Same contract for sceIoWaitAsync,
     // sceIoWaitAsyncCB and sceIoPollAsync: ops complete inline on this host, so
     // the stored per-fd result is final — write it as a sign-extended 64-bit
@@ -371,6 +372,13 @@ void DiscIo::wait_async(psprecomp::Runtime &runtime, psprecomp::AllegrexContext 
                   << std::dec << " ret=0\n";
     }
     ctx.set_gpr(2u, 0u);
+    // A real disc read takes time and the waiting thread blocks meanwhile, so
+    // lower-priority threads run before the result comes back. BBS depends on
+    // it: RsrcBuilder (prio 21) wakes AsyncFileAccess (prio 20) and only then
+    // marks the resource "requested" (state 3). Finishing the read inline let
+    // Async set "loaded" (7) first; RsrcBuilder overwrote it with 3 and the
+    // "common" lookup before 0x08A8BC6C returned null (+0x48 read). 2026-11-16.
+    if (blocking && async_wait_hook_) async_wait_hook_(runtime, ctx);
 }
 
 namespace {
