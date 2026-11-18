@@ -157,11 +157,15 @@ void unsetenv_compat(const char *name) {
 } // namespace
 
 int main(int argc, char **argv) {
-    // BBS's effect passes (shadow buffer, glows) are drawn by default since 2026-11-18: the Vulkan backend now
-    // translates every GE blend (generic_blend, 2*SRC_ALPHA in the shader), which removed the dark veil they
-    // caused. PSPRECOMP_GE_SKIP_FEEDBACK_DRAWS=1 still skips them (diagnosis).
-    if (const char *v = std::getenv("PSPRECOMP_GE_SKIP_FEEDBACK_DRAWS"); v == nullptr || v[0] != '1')
+    // BBS's screen-copy passes (draws that sample a render target: shadow buffer, screen glow / afterimage) are
+    // skipped by default again. The blend fix (2026-11-18) removed their dark veil, but the screen-glow pass still
+    // samples the frame copy at the wrong scale/offset: a bright, doubled "ghost" image (Land of Departure
+    // courtyard). Hit sparks and other effects are ordinary draws and show either way.
+    // PSPRECOMP_GE_SKIP_FEEDBACK_DRAWS=0 draws the passes (to work on them).
+    if (const char *v = std::getenv("PSPRECOMP_GE_SKIP_FEEDBACK_DRAWS"); v != nullptr && v[0] == '0')
         unsetenv_compat("PSPRECOMP_GE_SKIP_FEEDBACK_DRAWS");
+    else
+        setenv_compat("PSPRECOMP_GE_SKIP_FEEDBACK_DRAWS", "1");
     if (argc < 3 || argc > 4) {
         std::cerr << "Usage: BBSBringup <decrypted-elf> <disc-root> [max-dispatches]\n";
         return 2;
