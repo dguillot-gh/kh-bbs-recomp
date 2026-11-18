@@ -33,8 +33,9 @@ are re-implemented by [psp-native-runtime](https://github.com/dguillot-gh/psp-na
 - **HD texture packs** in PPSSPP format, such as BBS HD ReMix: import the ZIP from the in-game menu
   (see [HD textures](#hd-textures-optional)).
 
-**Not yet:** movies are skipped; shadows and full-screen glow effects are off (they still render incorrectly);
-the Windows build is behind the Android one. See `NOTES.md` for the detailed log.
+Shadows, glows and hit effects render.
+
+**Not yet:** movies are skipped; the Windows build is behind the Android one. See `NOTES.md` for the detailed log.
 
 ## Supported dump
 
