@@ -219,7 +219,8 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
                 (invertCamX ? "✓ " : "   ") + "Invert camera left/right",
                 (invertCamY ? "✓ " : "   ") + "Invert camera up/down",
                 "Stick deadzone… (" + Math.round(deadzone * 100) + "%)",
-                (texturePack ? "✓ " : "   ") + "HD texture pack" + (texturePackLoaded ? "" : " (none in files/textures)"),
+                "HD textures… (" + (!TexturePackInstaller.installed(getExternalFilesDir(null)) ? "not installed"
+                        : texturePack ? "on" : "off") + ")",
                 (fps60 ? "✓ " : "   ") + "60 FPS mode (experimental)",
                 "Resolution… (" + settings.getInt("render_scale", 1) + "x)",
                 "Aspect ratio… (" + (settings.getBoolean("widescreen", false) ? "Phone screen" : "16:9") + ")",
@@ -238,11 +239,7 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
                 case 7: invertCamX = !invertCamX; settings.edit().putBoolean("invert_cam_x", invertCamX).apply(); pushAnalog(); break;
                 case 8: invertCamY = !invertCamY; settings.edit().putBoolean("invert_cam_y", invertCamY).apply(); pushAnalog(); break;
                 case 9: openDeadzone(); break;
-                case 10:
-                    texturePack = !texturePack;
-                    settings.edit().putBoolean("texture_pack", texturePack).apply();
-                    texturePackLoaded = nativeSetTextureReplacement(texturePack);
-                    break;
+                case 10: openTextures(); break;
                 case 11:
                     fps60 = !fps60;
                     settings.edit().putBoolean("fps60", fps60).apply();
@@ -270,6 +267,107 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
         int x = Math.max(100, Math.min(1000, Math.round(100f * w / Math.max(1, h))));
         return "[Display]\nAspectRatio=Fill\n[Widescreen]\nEnabled=true\nAspectRatio=" + x + ":100\n"
                 + "GenericProjection=true\n";
+    }
+
+    // ---- HD textures (2026-11-18) ----
+    // A PPSSPP texture pack (BBS HD ReMix) is never shipped with the app: the player downloads the ZIP themselves and
+    // imports it here; TexturePackInstaller unpacks it into getExternalFilesDir()/textures, which the native texture
+    // replacer reads at startup. (An in-app download was built 11-18 and taken out for now at the user's request.)
+    private static final int REQUEST_IMPORT_ZIP = 4201;
+    private boolean installingTextures;
+
+    private void openTextures() {
+        final File ext = getExternalFilesDir(null);
+        final boolean installed = TexturePackInstaller.installed(ext);
+        java.util.List<String> items = new java.util.ArrayList<>();
+        java.util.List<Runnable> actions = new java.util.ArrayList<>();
+        if (installed) {
+            items.add((texturePack ? "✓ " : "   ") + "Use HD textures");
+            actions.add(() -> {
+                texturePack = !texturePack;
+                settings.edit().putBoolean("texture_pack", texturePack).apply();
+                texturePackLoaded = nativeSetTextureReplacement(texturePack);
+            });
+        }
+        items.add("Import a texture pack ZIP…");
+        actions.add(() -> {
+            android.content.Intent pick = new android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT);
+            pick.addCategory(android.content.Intent.CATEGORY_OPENABLE);
+            pick.setType("*/*");
+            pick.putExtra(android.content.Intent.EXTRA_MIME_TYPES,
+                    new String[] {"application/zip", "application/x-zip-compressed", "application/octet-stream"});
+            try {
+                startActivityForResult(pick, REQUEST_IMPORT_ZIP);
+            } catch (android.content.ActivityNotFoundException e) {
+                Toast.makeText(this, "No file picker on this phone", Toast.LENGTH_LONG).show();
+            }
+        });
+        if (installed) {
+            items.add("Remove HD textures");
+            actions.add(() -> showDialog(dialog().setTitle("Remove the HD texture pack?")
+                    .setMessage("Frees its storage. You can import it again later.")
+                    .setPositiveButton("Remove", (y, w) -> {
+                        TexturePackInstaller.remove(ext);
+                        askRestart("HD textures removed");
+                    })
+                    .setNegativeButton("Cancel", null).create()));
+        }
+        String title = installed ? "HD textures" : "HD textures (not installed)";
+        showDialog(dialog().setTitle(title)
+                .setItems(items.toArray(new String[0]), (x, which) -> actions.get(which).run())
+                .setNegativeButton("Back", null).create());
+    }
+
+    private interface StreamOpener { java.io.InputStream open() throws Exception; }
+
+    /** Unpacks on a background thread with a progress dialog; deleteAfter (the downloaded ZIP) is removed after. */
+    private void installTextures(StreamOpener opener, File deleteAfter) {
+        installingTextures = true;
+        final AlertDialog progress = dialog().setTitle("Installing HD textures…")
+                .setMessage("Unpacking…").setCancelable(false).create();
+        showDialog(progress);
+        final File ext = getExternalFilesDir(null);
+        new Thread(() -> {
+            String error;
+            try (java.io.InputStream in = new java.io.BufferedInputStream(opener.open(), 1 << 16)) {
+                error = TexturePackInstaller.install(in, ext, (files, bytes) -> handler.post(() ->
+                        progress.setMessage("Unpacking… " + files + " files, " + (bytes >> 20) + " MB")));
+            } catch (Exception e) {
+                error = "Couldn't open the ZIP: " + e.getMessage();
+            }
+            if (deleteAfter != null) //noinspection ResultOfMethodCallIgnored
+                deleteAfter.delete();
+            final String result = error;
+            handler.post(() -> {
+                installingTextures = false;
+                progress.dismiss();
+                if (result != null) {
+                    showDialog(dialog().setTitle("HD textures not installed").setMessage(result)
+                            .setPositiveButton("OK", null).create());
+                    return;
+                }
+                texturePack = true;
+                settings.edit().putBoolean("texture_pack", true).apply();
+                Toast.makeText(this, "HD textures installed", Toast.LENGTH_LONG).show();
+                // Shown a moment after the progress dialog is gone: opened in the same frame it never appeared.
+                handler.postDelayed(() -> askRestart("HD textures installed"), 300);
+            });
+        }, "texture-install").start();
+    }
+
+    private void askRestart(String what) {
+        showDialog(dialog().setTitle(what)
+                .setMessage("Restart the game to apply? Save a state first if you want to keep your progress.")
+                .setPositiveButton("Restart now", (y, w) -> restartApp())
+                .setNegativeButton("Later", null).create());
+    }
+
+    @Override
+    protected void onActivityResult(int request, int result, android.content.Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request != REQUEST_IMPORT_ZIP || result != RESULT_OK || data == null || data.getData() == null) return;
+        final android.net.Uri uri = data.getData();
+        installTextures(() -> getContentResolver().openInputStream(uri), null);
     }
 
     /** Original PSP aspect (bars at the sides) or Widescreen (wider view, experimental). Applied at startup. */

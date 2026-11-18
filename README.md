@@ -30,8 +30,8 @@ are re-implemented by [psp-native-runtime](https://github.com/dguillot-gh/psp-na
 - **Touch controls** you can move, resize and hide, with an analog stick; **gamepads** (both sticks, D-pad, triggers).
 - **Right-stick camera** (a dual-analog camera, like the RemasteredControls mod).
 - **Resolution** 1x-4x and **aspect ratio**: 16:9 or the full phone screen (wider view, not stretched).
-- **HD texture packs** in PPSSPP format, such as [BBS HD ReMix](https://github.com/AkiraJkr/Birth-by-Sleep-HD-ReMix)
-  (you download it yourself; see below).
+- **HD texture packs** in PPSSPP format, such as BBS HD ReMix: import the ZIP from the in-game menu
+  (see [HD textures](#hd-textures-optional)).
 
 **Not yet:** movies are skipped; shadows and full-screen glow effects are off (they still render incorrectly);
 the Windows build is behind the Android one. See `NOTES.md` for the detailed log.
@@ -62,9 +62,18 @@ bash scripts/6-INSTALL-PHONE.sh
 Everything made from your disc goes into `game/` and build output into `build/`; git ignores both.
 The install script doesn't copy everything the game needs yet (the ISO and the offline-decrypted `BBS1-3.DAT`).
 
-**HD textures:** copy the pack (the folder with `textures.ini`) to
-`Android/data/com.psprecomp.bbs/files/textures/` on the phone, then use "HD texture pack" in the menu. 2x resolution
-or higher is recommended.
+## HD textures (optional)
+
+The [BBS HD ReMix](https://github.com/AkiraJkr/Birth-by-Sleep-HD-ReMix) fan pack is not part of this project and isn't
+bundled with the app. To use it:
+
+1. On your phone, open the pack's GitHub page and tap **Code → Download ZIP** (about 550 MB; Wi-Fi recommended).
+   Keep the ZIP as it is; you don't need to unzip it. Any other PPSSPP-format pack (a ZIP with a `textures.ini`) works too.
+2. In the game, open the menu (☰) → **HD textures…** → **Import a texture pack ZIP…** and pick the ZIP.
+3. When it says "HD textures installed", tap **Restart now**. Save a state first if you're mid-game.
+
+You need about 1.2 GB free while it unpacks; afterwards you can delete the ZIP. The same menu turns the textures off
+or removes them. They look best at **Resolution 2x or higher**.
 
 **In-game menu:** the ☰ button, the phone's Back button, or Select+Start on a gamepad.
 
