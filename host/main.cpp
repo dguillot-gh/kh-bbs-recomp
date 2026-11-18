@@ -157,14 +157,11 @@ void unsetenv_compat(const char *name) {
 } // namespace
 
 int main(int argc, char **argv) {
-    // BBS's effect passes (shadow buffer at 0x04154000, which it also reuses for other effects in the same frame)
-    // still render wrong on the LCS-derived Vulkan backend, so they are skipped by default: the scene is correct,
-    // effects are missing. PSPRECOMP_GE_SKIP_FEEDBACK_DRAWS=0 brings them back. Fix: portable-ops-native's renderer
-    // (in progress). 2026-11-16.
-    if (const char *v = std::getenv("PSPRECOMP_GE_SKIP_FEEDBACK_DRAWS"); v != nullptr && v[0] == '0')
+    // BBS's effect passes (shadow buffer, glows) are drawn by default since 2026-11-18: the Vulkan backend now
+    // translates every GE blend (generic_blend, 2*SRC_ALPHA in the shader), which removed the dark veil they
+    // caused. PSPRECOMP_GE_SKIP_FEEDBACK_DRAWS=1 still skips them (diagnosis).
+    if (const char *v = std::getenv("PSPRECOMP_GE_SKIP_FEEDBACK_DRAWS"); v == nullptr || v[0] != '1')
         unsetenv_compat("PSPRECOMP_GE_SKIP_FEEDBACK_DRAWS");
-    else
-        setenv_compat("PSPRECOMP_GE_SKIP_FEEDBACK_DRAWS", "1");
     if (argc < 3 || argc > 4) {
         std::cerr << "Usage: BBSBringup <decrypted-elf> <disc-root> [max-dispatches]\n";
         return 2;
