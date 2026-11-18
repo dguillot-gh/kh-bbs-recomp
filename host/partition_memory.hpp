@@ -1,6 +1,7 @@
 #pragma once
 
 #include "psprecomp/runtime.hpp"
+#include "state_io.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -16,6 +17,16 @@ public:
     void install_hles(psprecomp::Runtime &runtime);
     void set_stack_floor_source(std::function<std::uint32_t()> source) { stack_floor_source_ = std::move(source); }
     [[nodiscard]] std::uint32_t high_watermark() const noexcept { return next_address_; }
+    // Save states (2026-11-18): allocations and fixed pools (both directions).
+    void serialize_state(psphost::StateIO &io) {
+        io.section("partition_memory");
+        io(next_address_);
+        io(next_uid_);
+        io.map_with(blocks_, [&io](Block &b) { io(b.name); io(b.address); io(b.size); });
+        io(free_blocks_);
+        io(next_fpl_uid_);
+        io.map_with(fixed_pools_, [&io](FixedPool &f) { io(f.name); io(f.base); io(f.block_size); io(f.used); });
+    }
 
 private:
     struct Block { std::string name; std::uint32_t address{}; std::uint32_t size{}; };

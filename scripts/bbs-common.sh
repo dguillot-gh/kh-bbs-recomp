@@ -32,7 +32,8 @@ pick() {  # first command that exists
   for c in "$@"; do command -v "$c" > /dev/null 2>&1 && { echo "$c"; return 0; }; done
   return 1
 }
-PYTHON=${PYTHON:-$(pick python3 python || true)}
+# The first Python that actually runs: on Windows `python3` can be the Microsoft Store placeholder.
+PYTHON=${PYTHON:-$(for c in python3 python py; do "$c" -c 'import sys' > /dev/null 2>&1 && { echo "$c"; break; }; done)}
 HOST_CXX=${HOST_CXX:-$(pick clang++ g++ || true)}
 HOST_CC=${HOST_CC:-$(pick clang gcc || true)}
 

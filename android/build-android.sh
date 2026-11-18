@@ -65,7 +65,10 @@ if [ "$WHAT" != lib ]; then
       -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
   fi
   O=$BUILD/apk; rm -rf "$O"; mkdir -p "$O/classes" "$O/dex" "$O/lib/arm64-v8a"
-  "$BT/aapt2$X" link -o "$(w "$O/base.apk")" -I "$(w "$JAR")" \
+  # Launcher icon: the logo from the disc's PSP_GAME/PIC1.PNG, made here so nothing from the disc is committed.
+  "$JDK/bin/java$X" "$(w "$HERE/tools/MakeIcon.java")" "$(w "$(dirname "$CORPUS")/disc-files/PSP_GAME/PIC1.PNG")" "$(w "$O/res")"
+  "$BT/aapt2$X" compile --dir "$(w "$O/res")" -o "$(w "$O/res.zip")"
+  "$BT/aapt2$X" link -o "$(w "$O/base.apk")" -I "$(w "$JAR")" -R "$(w "$O/res.zip")" \
     --manifest "$(w "$HERE/app/src/main/AndroidManifest.xml")" --min-sdk-version 26 --target-sdk-version 35 \
     --version-code 1 --version-name 0.1.0 --rename-manifest-package com.psprecomp.bbs
   "$JDK/bin/javac$X" -source 17 -target 17 -nowarn -encoding UTF-8 -cp "$(w "$JAR")" \

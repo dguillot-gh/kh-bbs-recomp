@@ -68,7 +68,7 @@ set(PSP_VCS_HOST_DIR "${PSPRECOMP_RUNTIME_DIR}/profiles/vcs/host")
 set(PSP_VCS_RENDERER_SOURCES)
 foreach(name framebuffer_capture ge_renderer ge_gpu_backend_dx12 vcs_config
         vcs_fps_overlay vcs_project2dfx vcs_project2dfx_lights
-        vcs_draw_distance_patch vcs_runtime_log)
+        vcs_draw_distance_patch vcs_runtime_log audio_output)
     list(APPEND PSP_VCS_RENDERER_SOURCES "${PSP_VCS_HOST_DIR}/${name}.cpp")
 endforeach()
 # GE HLEs shared by the game hosts (display lists -> the renderer above).
@@ -83,6 +83,7 @@ add_executable(BBSBringup
     host/savedata.cpp
     host/overlays.cpp
     host/movie_skip.cpp
+    host/sas_hle.cpp
     host/thread_manager.cpp
     host/partition_memory.cpp
     ${PSP_VCS_RENDERER_SOURCES}
@@ -90,7 +91,7 @@ add_executable(BBSBringup
     ${BBS_GENERATED_UNITS})
 target_link_libraries(BBSBringup PRIVATE psprecomp_core)
 if(WIN32)
-    target_link_libraries(BBSBringup PRIVATE d3d12 dxgi d3dcompiler dxguid)
+    target_link_libraries(BBSBringup PRIVATE d3d12 dxgi d3dcompiler dxguid winmm)
 endif()
 target_include_directories(BBSBringup PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/host" "${BBS_GENERATED_DIR}"

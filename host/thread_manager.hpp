@@ -1,6 +1,7 @@
 #pragma once
 
 #include "psprecomp/runtime.hpp"
+#include "state_io.hpp"
 
 #include <cstdint>
 #include <deque>
@@ -20,6 +21,14 @@ public:
     [[nodiscard]] std::uint32_t stack_floor() const noexcept { return next_stack_top_; }
     // Blocking HLEs outside this class (audio output) wait the way DelayThread does.
     void wait_like_delay(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) { delay_yield(runtime, ctx); }
+    // Save states (2026-11-18): every thread, the ready/delayed queues and all sync objects (both directions).
+    void serialize_state(psphost::StateIO &io);
+    [[nodiscard]] std::int32_t current_uid() const noexcept { return current_uid_; }
+    [[nodiscard]] std::string current_name() const;
+    // Called after every thread switch in activate_next (save/load/pause live there).
+    void set_safe_point_hook(std::function<void(psprecomp::Runtime &, psprecomp::AllegrexContext &)> hook) {
+        safe_point_hook_ = std::move(hook);
+    }
 
 private:
     // DelayThread(CB) and the vblank waits: park the caller (State::Delayed)
@@ -80,6 +89,7 @@ private:
     std::uint32_t next_stack_top_{0x09FF0000u};
     std::uint64_t next_ready_sequence_{1u};
     std::function<std::uint32_t()> heap_end_source_;
+    std::function<void(psprecomp::Runtime &, psprecomp::AllegrexContext &)> safe_point_hook_;
     std::unordered_map<std::int32_t, Thread> threads_;
     std::deque<ReadyItem> ready_;
     std::vector<std::int32_t> delayed_;  // Delayed threads, oldest first

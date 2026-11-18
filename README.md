@@ -67,9 +67,11 @@ without a window; `FRAMES=1 bash scripts/RUN-PC.sh` saves the frames it shows to
 - **[pspdecrypt](https://github.com/John-K/pspdecrypt)** (GPL-3.0): its libkirk/PrxDecrypter are fetched as the
   `third_party/pspdecrypt` submodule and only compiled into the local decrypting tool on your PC; nothing of it ships
   in the game.
-- **References** (read, not copied): [PPSSPP](https://github.com/hrydgard/ppsspp) for PSP hardware behaviour,
-  [OpenKH](https://openkh.dev/bbs/) for Birth by Sleep's file formats, and
-  [Portable Ops Native](https://github.com/zexk/portable-ops-native) / PortableKit for another PSP static
-  recompilation.
+- **[Portable Ops Native](https://github.com/zexk/portable-ops-native) / PortableKit** (MIT, "Portable Ops Native
+  contributors"), the Metal Gear Solid: Portable Ops port: its designs for swapping code overlays, skipping movies
+  without a decoder and sampling render targets are re-implemented here, and its Vulkan renderer is being adopted
+  for BBS's effects. Thank you! License text in `runtime/licenses/portable-ops-native-LICENSE`.
+- **References** (read, not copied): [PPSSPP](https://github.com/hrydgard/ppsspp) for PSP hardware behaviour, and
+  [OpenKH](https://openkh.dev/bbs/) for Birth by Sleep's file formats.
 
 Kingdom Hearts is © Disney / Square Enix. This project is not affiliated with them.

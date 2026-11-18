@@ -1,6 +1,7 @@
 #pragma once
 
 #include "psprecomp/runtime.hpp"
+#include "state_io.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -16,6 +17,8 @@ namespace bbs {
 class DiscIo {
 public:
     void install_hles(psprecomp::Runtime &runtime);
+    // Save states (2026-11-18): open files are saved as path + position and reopened on load.
+    void serialize_state(psphost::StateIO &io);
     // The game's ISO, for raw UMD access: "umd0:"/"umd1:" block reads and the
     // starting sector (LBN) that sceIoGetstat reports in st_private[0]. BBS
     // finds BBS0-4.DAT that way. Without an ISO those reads have nothing behind them.

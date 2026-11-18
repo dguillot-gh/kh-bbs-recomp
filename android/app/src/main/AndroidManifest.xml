@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.psprecomp.bbs">
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x400003" android:required="true" />
-    <application android:label="KH BBS Recomp" android:appCategory="game" android:isGame="true"
+    <application android:debuggable="true" android:label="KH BBS Recomp" android:icon="@mipmap/ic_launcher" android:appCategory="game" android:isGame="true"
         android:extractNativeLibs="true"
         android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
         <activity android:name=".BbsActivity" android:exported="true"

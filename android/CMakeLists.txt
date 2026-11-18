@@ -66,8 +66,8 @@ set(HOST_SOURCES
     ${HS}/ge_display.cpp ${HS}/guest_calls.cpp ${HS}/interrupts.cpp
     ${VCS}/framebuffer_capture.cpp ${GE_RENDERER_PATCHED} ${VCS}/ge_gpu_backend_vulkan.cpp ${VCS}/vcs_config.cpp
     ${VCS}/vcs_fps_overlay.cpp ${VCS}/vcs_project2dfx.cpp ${VCS}/vcs_project2dfx_lights.cpp
-    ${VCS}/vcs_draw_distance_patch.cpp ${VCS}/vcs_runtime_log.cpp
-    ${BBS_REPO}/host/main.cpp ${BBS_REPO}/host/disc_io.cpp ${BBS_REPO}/host/savedata.cpp ${BBS_REPO}/host/overlays.cpp ${BBS_REPO}/host/movie_skip.cpp
+    ${VCS}/vcs_draw_distance_patch.cpp ${VCS}/vcs_runtime_log.cpp ${VCS}/audio_output_android.cpp
+    ${BBS_REPO}/host/main.cpp ${BBS_REPO}/host/disc_io.cpp ${BBS_REPO}/host/savedata.cpp ${BBS_REPO}/host/overlays.cpp ${BBS_REPO}/host/movie_skip.cpp ${BBS_REPO}/host/sas_hle.cpp ${BBS_REPO}/host/atrac_hle.cpp
     ${BBS_REPO}/host/thread_manager.cpp ${BBS_REPO}/host/partition_memory.cpp
     jni/bbs_jni.cpp)
 
@@ -87,5 +87,16 @@ set_source_files_properties(${BBS_REPO}/host/main.cpp PROPERTIES COMPILE_DEFINIT
 set_source_files_properties(${HOST_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2")
 set_source_files_properties(${BBS_GENERATED_UNITS} ${BBS_OVERLAY_UNITS} "${BBS_GENERATED_DIR}/generated_registry.cpp"
     PROPERTIES COMPILE_OPTIONS "${BBS_GENERATED_OPT};-g0")
-target_link_libraries(bbs PRIVATE vulkan android log)
+# ATRAC3/3+ decoders (atrac_hle.cpp): PPSSPP's at3_standalone, LGPL 2.1+ (third_party/at3_standalone).
+set(BBS_AT3_DIR "${BBS_REPO}/third_party/at3_standalone")
+add_library(bbs_at3 STATIC
+    "${BBS_AT3_DIR}/atrac.cpp" "${BBS_AT3_DIR}/atrac3.cpp" "${BBS_AT3_DIR}/atrac3plus.cpp"
+    "${BBS_AT3_DIR}/atrac3plusdec.cpp" "${BBS_AT3_DIR}/atrac3plusdsp.cpp" "${BBS_AT3_DIR}/get_bits.cpp"
+    "${BBS_AT3_DIR}/compat.cpp" "${BBS_AT3_DIR}/fft.cpp" "${BBS_AT3_DIR}/mem.cpp")
+target_include_directories(bbs_at3 PRIVATE "${BBS_AT3_DIR}")
+target_compile_options(bbs_at3 PRIVATE -O2 -w)
+target_link_libraries(bbs_at3 PRIVATE log)
+set_target_properties(bbs_at3 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(bbs PRIVATE "${BBS_AT3_DIR}")
+target_link_libraries(bbs PRIVATE vulkan android log aaudio bbs_at3)
 target_link_options(bbs PRIVATE -Wl,--gc-sections -Wl,-z,max-page-size=16384)

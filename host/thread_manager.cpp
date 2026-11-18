@@ -7,6 +7,7 @@
 #include "psprecomp/common.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -743,6 +744,17 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
         runtime.register_hle("ThreadManForUser", nid,
             [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
                 if (psphost::deliver_alarms(ctx, ctx.gpr[4u])) return;
+                // PSPRECOMP_THREAD_DUMP_SECS=N: dump every thread's state at most every N
+                // real seconds, for hangs where some thread still runs (2026-11-17).
+                static const char *dump_secs = std::getenv("PSPRECOMP_THREAD_DUMP_SECS");
+                if (dump_secs != nullptr) {
+                    static auto last = std::chrono::steady_clock::now();
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - last > std::chrono::seconds(std::max(1, std::atoi(dump_secs)))) {
+                        last = now;
+                        dump_threads("periodic");
+                    }
+                }
                 delay_yield(rt, ctx);
             });
     }
@@ -1010,7 +1022,12 @@ bool ThreadManager::activate_next(psprecomp::Runtime &runtime,
     if (thread_diag_enabled())
         std::cerr << "[pw-thread] switch reason=" << reason << " uid=" << item.uid
                   << " name=" << thread.name << " pc=" << psprecomp::hex32(ctx.pc) << "\n";
-    (void)runtime;
+    // Save states / pause (main.cpp) happen here, at a thread switch: every thread is parked with its full context
+    // in threads_ and ctx is the next thread at its resume pc, so nothing is mid-HLE. In gameplay BBS waits only on
+    // semaphores/event flags/vblank interrupts, so the vblank-wait and DelayThread hooks of the first version were
+    // never reached (load "did nothing", pause didn't hold). A load replaces threads_ and ctx; the caller's HLE then
+    // returns and the chain unwinds to the restored ctx.pc. 2026-11-18.
+    if (safe_point_hook_) safe_point_hook_(runtime, ctx);
     return true;
 }
 
@@ -1151,6 +1168,70 @@ void ThreadManager::delete_thread(psprecomp::Runtime &, psprecomp::AllegrexConte
     end_waiters_.erase(uid);
     threads_.erase(found);
     set_success(ctx);
+}
+
+std::string ThreadManager::current_name() const {
+    const auto found = threads_.find(current_uid_);
+    return found != threads_.end() ? found->second.name : std::string{};
+}
+
+void ThreadManager::serialize_state(psphost::StateIO &io) {
+    io.section("threads");
+    io(current_uid_); io(next_uid_); io(next_lw_mutex_uid_); io(next_semaphore_uid_); io(next_message_pipe_uid_);
+    io(next_mutex_uid_); io(next_event_flag_uid_); io(next_stack_top_); io(next_ready_sequence_);
+    io(switches_);
+    std::uint64_t n = threads_.size();
+    io(n);
+    auto thread = [&io](Thread &t) {
+        io(t.name); io(t.entry); io(t.priority); io(t.stack_bottom); io(t.stack_top); io(t.state);
+        io(t.ready_sequence); io(t.context); io(t.wakeup); io(t.delay_due);
+    };
+    if (io.loading()) {
+        threads_.clear();
+        for (std::uint64_t i = 0; i < n; ++i) {
+            std::int32_t uid{};
+            io(uid);
+            thread(threads_[uid]);
+        }
+    } else {
+        for (auto &[uid, t] : threads_) {
+            std::int32_t key = uid;
+            io(key);
+            thread(t);
+        }
+    }
+    io(ready_);
+    io(delayed_);
+    io(end_waiters_);
+    auto sema = [&io](Semaphore &m) { io(m.count); io(m.maximum); io(m.waiting); };
+    auto pipe = [&io](MessagePipe &m) {
+        io(m.name); io(m.capacity); io(m.bytes); io(m.waiting_readers); io(m.waiting_writers);
+    };
+    auto flag = [&io](EventFlag &f) { io(f.name); io(f.attributes); io(f.pattern); io(f.waiters); };
+    n = semaphores_.size();
+    io(n);
+    if (io.loading()) {
+        semaphores_.clear();
+        for (std::uint64_t i = 0; i < n; ++i) { std::int32_t k{}; io(k); sema(semaphores_[k]); }
+    } else {
+        for (auto &[k, m] : semaphores_) { std::int32_t key = k; io(key); sema(m); }
+    }
+    n = message_pipes_.size();
+    io(n);
+    if (io.loading()) {
+        message_pipes_.clear();
+        for (std::uint64_t i = 0; i < n; ++i) { std::int32_t k{}; io(k); pipe(message_pipes_[k]); }
+    } else {
+        for (auto &[k, m] : message_pipes_) { std::int32_t key = k; io(key); pipe(m); }
+    }
+    n = event_flags_.size();
+    io(n);
+    if (io.loading()) {
+        event_flags_.clear();
+        for (std::uint64_t i = 0; i < n; ++i) { std::int32_t k{}; io(k); flag(event_flags_[k]); }
+    } else {
+        for (auto &[k, f] : event_flags_) { std::int32_t key = k; io(key); flag(f); }
+    }
 }
 
 } // namespace bbs

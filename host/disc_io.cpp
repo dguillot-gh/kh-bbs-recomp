@@ -597,4 +597,38 @@ void DiscIo::ioctl(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx)
     ctx.set_gpr(2u, 0u);
 }
 
+void DiscIo::serialize_state(psphost::StateIO &io) {
+    io.section("disc_io");
+    io(next_fd_);
+    io(async_results_);
+    io(next_module_uid_);
+    io(modules_);
+    io.map_with(files_, [&io](OpenFile &f) {
+        std::string native = f.native.string();
+        io(native);
+        io(f.readable); io(f.writable); io(f.raw); io(f.base); io(f.size); io(f.position);
+        std::int64_t offset = -1;
+        if (!io.loading() && f.raw == Raw::None && f.stream.is_open()) {
+            f.stream.clear();
+            offset = static_cast<std::int64_t>(f.readable ? f.stream.tellg() : f.stream.tellp());
+        }
+        io(offset);
+        if (!io.loading()) return;
+        // Reopen (no truncate / append: the file already holds what was written before the save).
+        f.native = native;
+        if (f.raw != Raw::None || native.empty()) return;
+        std::error_code error;
+        if (!std::filesystem::is_regular_file(f.native, error)) return;   // directory probe handle
+        std::ios::openmode mode = std::ios::binary;
+        if (f.readable) mode |= std::ios::in;
+        if (f.writable) mode |= std::ios::out | std::ios::in;
+        f.stream.open(f.native, mode);
+        if (f.stream && offset >= 0) {
+            if (f.readable) f.stream.seekg(offset, std::ios::beg);
+            if (f.writable) f.stream.seekp(offset, std::ios::beg);
+        }
+        if (!f.stream) std::cerr << "[state] could not reopen " << native << '\n';
+    });
+}
+
 } // namespace bbs

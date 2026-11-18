@@ -13,11 +13,19 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <vector>
 
 int bbs_main(int argc, char **argv);
 extern std::atomic<std::uint32_t> g_bbs_pad_buttons;
+extern std::atomic<std::uint32_t> g_bbs_pad_analog;
+extern std::atomic<int> g_bbs_state_request;
+extern std::atomic<int> g_bbs_state_result;
+extern std::mutex g_bbs_state_mutex;
+extern std::string g_bbs_state_path;
+extern std::atomic<bool> g_bbs_paused;
+extern std::atomic<std::uint64_t> g_bbs_flip_count;
 
 namespace {
 std::atomic<bool> g_started{false};
@@ -87,6 +95,40 @@ extern "C" JNIEXPORT void JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeSetBu
     g_bbs_pad_buttons.store(static_cast<std::uint32_t>(buttons), std::memory_order_relaxed);
 }
 
+// Sticks as 0..255 (128 = centre, y grows downward like the PSP).
+extern "C" JNIEXPORT void JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeSetAnalog(JNIEnv *, jclass, jint lx,
+                                                                                   jint ly, jint rx, jint ry) {
+    auto c = [](jint v) { return static_cast<std::uint32_t>(v < 0 ? 0 : (v > 255 ? 255 : v)); };
+    g_bbs_pad_analog.store(c(lx) | (c(ly) << 8u) | (c(rx) << 16u) | (c(ry) << 24u), std::memory_order_relaxed);
+}
+
+// Save states (2026-11-18): op 1 = save, 2 = load, carried out by the game thread at its next vblank wait.
+extern "C" JNIEXPORT void JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeRequestState(JNIEnv *env, jclass, jint op,
+                                                                                       jstring path) {
+    const char *c = env->GetStringUTFChars(path, nullptr);
+    {
+        std::lock_guard<std::mutex> lock(g_bbs_state_mutex);
+        g_bbs_state_path = c;
+    }
+    env->ReleaseStringUTFChars(path, c);
+    g_bbs_state_result.store(0);
+    g_bbs_state_request.store(op);
+}
+
+// 0 = pending, 1 = done, -1 = failed.
+extern "C" JNIEXPORT jint JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeStateResult(JNIEnv *, jclass) {
+    return g_bbs_state_result.load();
+}
+
+// Pause holds the game thread at its next vblank wait (state requests still run while paused).
+extern "C" JNIEXPORT void JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeSetPaused(JNIEnv *, jclass, jboolean p) {
+    g_bbs_paused.store(p == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT jlong JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeFlipCount(JNIEnv *, jclass) {
+    return static_cast<jlong>(g_bbs_flip_count.load(std::memory_order_relaxed));
+}
+
 extern "C" JNIEXPORT jboolean JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeStart(JNIEnv *env, jclass,
                                                                                     jstring files_dir,
                                                                                     jstring eboot, jstring disc,
@@ -102,9 +144,16 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeS
     const std::string dir = str(files_dir);
     // vcs::initialize_vcs_configuration reads VCSNative.ini beside argv[0]; the Java side writes it to files/.
     setenv("PSPRECOMP_CONFIG", (dir + "/VCSNative.ini").c_str(), 0);
+    // Graphics capture always armed: idle until `adb shell setprop debug.bbs.capture 1`, then it writes draws and
+    // textures to Download/bbs-cap (readable by adb). env.txt may override.
+    setenv("PSPRECOMP_GE_CAPTURE", "/storage/emulated/0/Download/bbs-cap", 0);
     // Optional debug switches: files/env.txt, one KEY=VALUE per line (push it with adb).
     const std::string eboot_path = str(eboot);
-    const std::string env_file = eboot_path.substr(0, eboot_path.find_last_of('/') + 1) + "env.txt";
+    // Internal files/env.txt first (writable with `adb shell run-as`); the external one beside the EBOOT is
+    // created by adb's shell user (mode 660, group ext_data_rw), which the app cannot read on Android 14+.
+    std::string env_file = dir + "/env.txt";
+    if (FILE *probe = std::fopen(env_file.c_str(), "r")) std::fclose(probe);
+    else env_file = eboot_path.substr(0, eboot_path.find_last_of('/') + 1) + "env.txt";
     if (FILE *f = std::fopen(env_file.c_str(), "r")) {
         char line[512];
         while (std::fgets(line, sizeof line, f)) {
