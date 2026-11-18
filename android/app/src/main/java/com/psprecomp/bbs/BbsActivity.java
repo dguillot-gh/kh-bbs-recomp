@@ -156,7 +156,10 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
             // (vcs_config Rendering.InternalResolutionMode/InternalScale). Read once at startup.
             int scale = Math.max(1, Math.min(4, settings.getInt("render_scale", 1)));
             String rendering = "[Rendering]\nBackend=Vulkan\nNativeGE=true\n"
-                    + (scale > 1 ? "InternalResolutionMode=Scale\nInternalScale=" + scale + "\n" : "");
+                    + (scale > 1 ? "InternalResolutionMode=Scale\nInternalScale=" + scale + "\n" : "")
+                    // Aspect (menu "Aspect ratio"): Original = PSP 480:272 with side bars; Widescreen = the
+                    // renderer's Hor+ projection widening to the screen's ratio (vcs_config [Widescreen]).
+                    + (settings.getBoolean("widescreen", false) ? widescreenIni() : "");
             out.write(rendering.getBytes("UTF-8"));
         } catch (Exception e) {
             Log.e(TAG, "VCSNative.ini", e);
@@ -219,6 +222,7 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
                 (texturePack ? "✓ " : "   ") + "HD texture pack" + (texturePackLoaded ? "" : " (none in files/textures)"),
                 (fps60 ? "✓ " : "   ") + "60 FPS mode (experimental)",
                 "Resolution… (" + settings.getInt("render_scale", 1) + "x)",
+                "Aspect ratio… (" + (settings.getBoolean("widescreen", false) ? "Phone screen" : "16:9") + ")",
         };
         AlertDialog d = dialog().setTitle("Birth by Sleep").setItems(items, (x, which) -> {
             switch (which) {
@@ -245,6 +249,7 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
                     nativeSet60Fps(fps60);
                     break;
                 case 12: openResolution(); break;
+                case 13: openAspect(); break;
                 default: break;
             }
         }).create();
@@ -252,6 +257,38 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     /** Internal render resolution, 1x (PSP 480x272) to 4x. Applied at startup, so offer a restart. */
+    /**
+     * Widescreen = fill the whole screen with a wider 3D view. The renderer's Hor+ factor comes from
+     * [Widescreen] AspectRatio (on Android its "desktop" surface is still 480:272, so give it the real screen),
+     * and the presenter must fill the screen ([Display] AspectRatio=Fill) instead of pillarboxing; the
+     * projection is narrowed by the same factor, so nothing looks stretched. 2D HUD draws are re-squeezed.
+     */
+    private String widescreenIni() {
+        android.graphics.Rect b = getWindowManager().getCurrentWindowMetrics().getBounds();
+        int w = Math.max(b.width(), b.height()), h = Math.min(b.width(), b.height());
+        // vcs_config caps each side at 1000: write the ratio as N:100 (2712x1220 -> 222:100).
+        int x = Math.max(100, Math.min(1000, Math.round(100f * w / Math.max(1, h))));
+        return "[Display]\nAspectRatio=Fill\n[Widescreen]\nEnabled=true\nAspectRatio=" + x + ":100\n"
+                + "GenericProjection=true\n";
+    }
+
+    /** Original PSP aspect (bars at the sides) or Widescreen (wider view, experimental). Applied at startup. */
+    private void openAspect() {
+        final boolean current = settings.getBoolean("widescreen", false);
+        String[] choices = {"16:9 — PSP original (bars at the sides)", "Phone screen — fill it, wider view (experimental)"};
+        AlertDialog d = dialog().setTitle("Aspect ratio").setSingleChoiceItems(choices, current ? 1 : 0, (x, which) -> {
+            x.dismiss();
+            boolean wide = which == 1;
+            if (wide == current) return;
+            settings.edit().putBoolean("widescreen", wide).apply();
+            showDialog(dialog().setTitle("Restart to apply?")
+                    .setMessage("The game restarts. Save a state first if you want to keep your progress.")
+                    .setPositiveButton("Restart now", (y, w) -> restartApp())
+                    .setNegativeButton("Later", null).create());
+        }).setNegativeButton("Back", null).create();
+        showDialog(d);
+    }
+
     private void openResolution() {
         final int current = Math.max(1, Math.min(4, settings.getInt("render_scale", 1)));
         String[] choices = {
