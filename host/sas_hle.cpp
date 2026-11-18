@@ -6,6 +6,7 @@
 
 #include "sas_hle.hpp"
 #include "state_io.hpp"
+#include "perf_stats.hpp"
 
 #include "psprecomp/runtime.hpp"
 
@@ -684,6 +685,7 @@ void sas_mix_into(psprecomp::Runtime &rt, std::uint32_t output, std::uint32_t fr
                   bool include_input = false,
                   std::uint32_t input_left = 0x1000u,
                   std::uint32_t input_right = 0x1000u) {
+    psphost::perf::Scope perf_scope(psphost::perf::Sas);
     static thread_local std::vector<std::int32_t> dry_mix;
     static thread_local std::vector<std::int32_t> effect_send;
     static thread_local std::vector<std::int32_t> wet_mix;
@@ -721,6 +723,7 @@ void sas_mix_into(psprecomp::Runtime &rt, std::uint32_t output, std::uint32_t fr
 // only two bytes per frame, which could both lose send-routed sounds and write
 // the wrong guest buffer layout.
 void sas_mix_raw(psprecomp::Runtime &rt, std::uint32_t output, std::uint32_t frames) {
+    psphost::perf::Scope perf_scope(psphost::perf::Sas);
     static thread_local std::vector<std::int32_t> dry_mix;
     static thread_local std::vector<std::int32_t> effect_send;
     sas_render_buses(rt.memory(), frames, dry_mix, effect_send);

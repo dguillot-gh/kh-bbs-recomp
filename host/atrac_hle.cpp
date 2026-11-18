@@ -13,6 +13,7 @@
 
 #include "atrac_hle.hpp"
 #include "state_io.hpp"
+#include "perf_stats.hpp"
 
 #include "psprecomp/common.hpp"
 #include "psprecomp/runtime.hpp"
@@ -88,6 +89,7 @@ struct Track {
 
     // Decodes the next frame into `pending`, dropping samples before first_offset.
     bool decode_next(const psprecomp::GuestMemory &memory) {
+        psphost::perf::Scope perf_scope(psphost::perf::Atrac);
         if (next_frame >= frame_count()) return false;
         const std::uint32_t at = data_offset + next_frame * static_cast<std::uint32_t>(block_align);
         if (at + static_cast<std::uint32_t>(block_align) > available) return false;

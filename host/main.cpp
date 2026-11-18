@@ -18,6 +18,7 @@
 #include "atrac_hle.hpp"
 #include "guest_calls.hpp"
 #include "state_io.hpp"
+#include "perf_stats.hpp"
 #include <cstring>
 #include <fstream>
 #include <functional>
@@ -609,6 +610,7 @@ int main(int argc, char **argv) {
                 // (no-op on the software path). 2026-11-16.
                 psphost::ge_display_present_gpu_frame(rt, buffer, stride, format, psphost::vblank_count());
                 g_bbs_flip_count.fetch_add(1u, std::memory_order_relaxed);
+                psphost::perf::frame_tick();   // [perf] frame breakdown every 2 s (PSPRECOMP_PERF=1)
                 if (g_bbs_60fps.load(std::memory_order_relaxed) && rt.memory().load32(kBbsFrameModeAddress) == 1u)
                     rt.memory().store32(kBbsFrameModeAddress, 0u);
                 // Seal audio up to now even on frames nothing was submitted (silence, not underrun).
@@ -1162,6 +1164,7 @@ int main(int argc, char **argv) {
             ++psprecomp::g_runtime_thread_switch_generation_fast;
             psprecomp::set_runtime_thread_identity(threads.current_uid(), threads.current_name());
             bbs::overlays_code_changed(rt, 0x08000000u, 0x02000000u);
+            vcs::audio_output_rebase(psphost::virtual_time_us());   // sound after a load (11-18)
         };
         threads.set_safe_point_hook([&, save_state_to, load_state_from, after_load](
                                         psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
