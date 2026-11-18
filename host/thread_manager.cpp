@@ -7,7 +7,10 @@
 #include "psprecomp/common.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstring>
+#include <span>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -19,7 +22,11 @@ ThreadManager *g_thread_manager{};
 
 void set_success(psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); }
 void set_error(psprecomp::AllegrexContext &ctx, std::uint32_t error) { ctx.set_gpr(2u, error); }
+} // namespace
+int g_thread_diag_burst = 0;  // movie_player.cpp: log this many switches (PSPRECOMP_MOVIE_TRACE=3)
+namespace {
 bool thread_diag_enabled() {
+    if (g_thread_diag_burst > 0) return true;
     return std::getenv("PSPRECOMP_THREAD_DIAG") != nullptr ||
         std::getenv("PSPRECOMP_TRACE") != nullptr;
 }
@@ -680,6 +687,28 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
             found->second.pattern &= ~ctx.gpr[5u];
             set_success(ctx);
         });
+    // sceKernelReferEventFlagStatus(uid, info*) (2026-11-18, the movie thread uses it). SceKernelEventFlagInfo:
+    // 0 size, 4 name[32], 36 attr, 40 initPattern, 44 currentPattern, 48 numWaitThreads; at most `size` bytes.
+    runtime.register_hle("ThreadManForUser", 0xA66B0120u,
+        [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            const auto found = event_flags_.find(static_cast<std::int32_t>(ctx.gpr[4u]));
+            if (found == event_flags_.end()) { set_error(ctx, 0x80020199u); return; }
+            const std::uint32_t info = ctx.gpr[5u];
+            if (info == 0u || !rt.memory().contains(info, 4u)) { set_success(ctx); return; }
+            const std::uint32_t size = std::min<std::uint32_t>(rt.memory().load32(info), 52u);
+            std::array<std::uint8_t, 52> out{};
+            const EventFlag &flag = found->second;
+            const auto put32 = [&out](std::size_t at, std::uint32_t v) { std::memcpy(&out[at], &v, 4u); };
+            put32(0u, size);
+            std::memcpy(&out[4], flag.name.data(), std::min<std::size_t>(flag.name.size(), 31u));
+            put32(36u, flag.attributes);
+            put32(40u, flag.pattern);  // the initial pattern isn't kept
+            put32(44u, flag.pattern);
+            put32(48u, static_cast<std::uint32_t>(flag.waiters.size()));
+            if (size > 4u && rt.memory().contains(info, size))
+                rt.memory().copy_in(info + 4u, std::span<const std::uint8_t>(out.data() + 4, size - 4u));
+            set_success(ctx);
+        });
     runtime.register_hle("ThreadManForUser", 0x30FD48F0u,
         [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
             const auto uid = static_cast<std::int32_t>(ctx.gpr[4u]);
@@ -743,7 +772,21 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
     for (const std::uint32_t nid : {0xCEADEB47u, 0x68DA9E36u}) {
         runtime.register_hle("ThreadManForUser", nid,
             [this](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
-                if (psphost::deliver_alarms(ctx, ctx.gpr[4u])) return;
+                // Timed waits (2026-11-18): the wait ends at this thread's own time + the delay, and the clock only
+                // moves when nothing can run (activate_next). PSPRECOMP_EAGER_CLOCK=1: the old way, where every
+                // delay pushed the shared clock by its whole length at once.
+                std::uint64_t wake = 0u;
+                if (eager_clock()) {
+                    if (psphost::deliver_alarms(ctx, ctx.gpr[4u])) return;
+                } else {
+                    if (psphost::deliver_alarms(ctx, 0u)) return;
+                    const std::uint64_t now = psphost::virtual_time_us();
+                    std::uint64_t &line = delay_line_[current_uid_];
+                    // A thread that was blocked on something else (or is new) starts its timeline from now.
+                    if (line + kDelayLineSlackUs < now || line > now + kDelayLineSlackUs) line = now;
+                    line += ctx.gpr[4u];
+                    wake = line;
+                }
                 // PSPRECOMP_THREAD_DUMP_SECS=N: dump every thread's state at most every N
                 // real seconds, for hangs where some thread still runs (2026-11-17).
                 static const char *dump_secs = std::getenv("PSPRECOMP_THREAD_DUMP_SECS");
@@ -755,7 +798,7 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
                         dump_threads("periodic");
                     }
                 }
-                delay_yield(rt, ctx);
+                delay_yield(rt, ctx, wake);
             });
     }
     // sceDisplay vblank waits (bring-up): count the frame and wait like a
@@ -767,7 +810,23 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
                 // First the game's vblank interrupt handlers (guest code); they
                 // resume this same import, which then counts the frame and waits.
                 // (PW's frame limiter waits for a counter its handler increments.)
-                if (psphost::deliver_vblank_interrupt(ctx)) return;
+                if (eager_clock()) {
+                    if (psphost::deliver_vblank_interrupt(ctx)) return;
+                } else {
+                    // Timed: wait until the vblank is due, then start it (handlers), then return.
+                    // vblank_phase_: 2 = waited for it, 1 = delivered (re-entry after its handlers).
+                    int &phase = vblank_phase_[current_uid_];
+                    if (phase == 0) {
+                        const std::uint64_t due = psphost::next_vblank_time();
+                        phase = 2;
+                        if (due > psphost::virtual_time_us() && wait_until(rt, ctx, due)) return;
+                    }
+                    if (phase == 2) {
+                        phase = 1;
+                        if (psphost::deliver_vblank_now(ctx)) return;
+                    }
+                    vblank_phase_.erase(current_uid_);
+                }
                 ++vblank_count;
                 // Frame dumps (roadmap phase 1): PPM files of changed frames
                 // when PSPRECOMP_FRAME_DUMP_DIR is set (VCS's capture code,
@@ -802,28 +861,46 @@ void ThreadManager::install_hles(psprecomp::Runtime &runtime) {
         });
 }
 
-void ThreadManager::delay_yield(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) {
-    set_success(ctx);
+bool ThreadManager::wait_until(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx, std::uint64_t wake_us) {
+    return delay_yield(runtime, ctx, wake_us, true);
+}
+
+bool ThreadManager::eager_clock() {
+    static const bool eager = [] {
+        const char *v = std::getenv("PSPRECOMP_EAGER_CLOCK");
+        return v != nullptr && *v != '0';
+    }();
+    return eager;
+}
+
+bool ThreadManager::delay_yield(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx, std::uint64_t wake_us,
+                                bool reenter) {
+    if (!reenter) set_success(ctx);
     // Nothing else could run: the delay just passes.
-    if (ready_.empty() && delayed_.empty()) return;
+    if (ready_.empty() && delayed_.empty()) { psphost::advance_clock_to(wake_us); return false; }
     const auto self = threads_.find(current_uid_);
     if (self == threads_.end()) {
         runtime.stop("BBS delay: delaying thread unknown");
-        return;
+        return false;
     }
     // Park until the CPU is idle, so every ready peer runs first, even a
     // lower-priority one (user_main 19 vs DiscInfoBind 20, 10/27). A plain
     // yield put the thread straight back in ready_, and two delaying threads
     // then took turns forever above a lower-priority one (PW S2b, review 10/28).
     self->second.context = ctx;
-    self->second.context.pc = ctx.gpr[31u]; // Resume past the import.
+    if (!reenter) self->second.context.pc = ctx.gpr[31u]; // Resume past the import (or run it again).
     self->second.state = State::Delayed;
-    self->second.delay_due = switches_ + kDelaySwitches;
+    // A timed wait still ends after many switches when other threads never stop handing work to each other
+    // (activate_next then moves the clock to its wake time).
+    self->second.delay_due =
+        switches_ + (wake_us > psphost::virtual_time_us() ? kTimedDelaySwitches : kDelaySwitches);
+    self->second.wake_us = wake_us;
     delayed_.push_back(current_uid_);
     if (!activate_next(runtime, ctx, "delay")) {
         dump_threads("no thread to run after a delay");
         runtime.stop("BBS deadlock: no thread to run after a delay");
     }
+    return true;
 }
 
 void ThreadManager::dump_threads(const char *why) const {
@@ -980,30 +1057,66 @@ bool ThreadManager::activate_next(psprecomp::Runtime &runtime,
         for (const std::int32_t uid : delayed_) {
             const auto found = threads_.find(uid);
             if (found == threads_.end() || found->second.state != State::Delayed) continue;
-            if (found->second.delay_due <= switches_) enqueue(uid, found->second.context);
-            else waiting.push_back(uid);
+            const std::uint64_t now = psphost::virtual_time_us();
+            if (found->second.delay_due <= switches_ && found->second.wake_us <= now + kBusyWakeAheadUs) {
+                psphost::advance_clock_to(found->second.wake_us);
+                enqueue(uid, found->second.context);
+            } else if (found->second.delay_due + kTimedDelaySwitches <= switches_) {
+                psphost::advance_clock_to(found->second.wake_us);   // starved: time has to move for it
+                enqueue(uid, found->second.context);
+            } else {
+                waiting.push_back(uid);
+            }
         }
         delayed_ = std::move(waiting);
     }
+    // Nothing can run: time passes up to the earliest timed wake (waits without a wake time are over at once).
+    // delayed_ is reordered as [over..., still waiting...]; later_count_ = how many still wait.
+    later_count_ = 0u;
     if (ready_.empty() && !delayed_.empty()) {
+        std::uint64_t earliest = UINT64_MAX;
+        bool any_due = false;
+        const std::uint64_t now = psphost::virtual_time_us();
+        for (const std::int32_t uid : delayed_) {
+            const auto found = threads_.find(uid);
+            if (found == threads_.end() || found->second.state != State::Delayed) continue;
+            if (found->second.wake_us <= now) any_due = true;
+            else earliest = std::min(earliest, found->second.wake_us);
+        }
+        if (!any_due && earliest != UINT64_MAX) psphost::advance_clock_to(earliest);
+        const std::uint64_t then = psphost::virtual_time_us();
+        std::vector<std::int32_t> due, later;
+        for (const std::int32_t uid : delayed_) {
+            const auto found = threads_.find(uid);
+            if (found == threads_.end() || found->second.state != State::Delayed) continue;
+            (found->second.wake_us <= then ? due : later).push_back(uid);
+        }
+        later_count_ = later.size();
+        delayed_ = std::move(due);
+        for (const std::int32_t uid : later) delayed_.push_back(uid);
+    }
+    if (ready_.empty() && delayed_.size() > later_count_) {
         // Nothing can run, so time passes: the delayed threads' waits are over.
         // The thread that delayed last (the back) waits one more round when
         // others delayed before it, so two delaying threads alternate instead
         // of the higher-priority one winning every time.
+        // (Only threads whose wait is over take part; the others stay delayed.)
+        const std::size_t due_count = delayed_.size() - later_count_;
         std::vector<std::int32_t> keep;
-        if (delayed_.size() > 1u) keep.push_back(delayed_.back());
-        for (std::size_t i = 0; i < delayed_.size() - keep.size(); ++i) {
+        if (due_count > 1u) keep.push_back(delayed_[due_count - 1u]);
+        for (std::size_t i = 0; i < due_count - keep.size(); ++i) {
             const auto found = threads_.find(delayed_[i]);
             if (found != threads_.end() && found->second.state == State::Delayed)
                 enqueue(delayed_[i], found->second.context);
         }
-        delayed_ = std::move(keep);
-        if (ready_.empty() && !delayed_.empty()) { // Every earlier one was gone.
-            const auto found = threads_.find(delayed_.front());
+        if (ready_.empty() && !keep.empty()) { // Every earlier one was gone.
+            const auto found = threads_.find(keep.front());
             if (found != threads_.end() && found->second.state == State::Delayed)
-                enqueue(delayed_.front(), found->second.context);
-            delayed_.clear();
+                enqueue(keep.front(), found->second.context);
+            keep.clear();
         }
+        for (std::size_t i = due_count; i < delayed_.size(); ++i) keep.push_back(delayed_[i]);
+        delayed_ = std::move(keep);
     }
     if (ready_.empty()) return false;
 
@@ -1020,7 +1133,7 @@ bool ThreadManager::activate_next(psprecomp::Runtime &runtime,
     ctx = thread.context;
     psprecomp::set_runtime_thread_identity(item.uid, thread.name);
     if (thread_diag_enabled())
-        std::cerr << "[pw-thread] switch reason=" << reason << " uid=" << item.uid
+        std::cerr << "[pw-thread] switch t=" << (--g_thread_diag_burst, psphost::virtual_time_us()) << " reason=" << reason << " uid=" << item.uid
                   << " name=" << thread.name << " pc=" << psprecomp::hex32(ctx.pc) << "\n";
     // Save states / pause (main.cpp) happen here, at a thread switch: every thread is parked with its full context
     // in threads_ and ctx is the next thread at its resume pc, so nothing is mid-HLE. In gameplay BBS waits only on

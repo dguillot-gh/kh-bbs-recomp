@@ -21,6 +21,11 @@ public:
     [[nodiscard]] std::uint32_t stack_floor() const noexcept { return next_stack_top_; }
     // Blocking HLEs outside this class (audio output) wait the way DelayThread does.
     void wait_like_delay(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) { delay_yield(runtime, ctx); }
+    // Timed wait (2026-11-18): park until the virtual clock reaches wake_us, then run the same import again.
+    // Returns false (nothing parked) when no other thread could run: the clock was moved to wake_us at once.
+    bool wait_until(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx, std::uint64_t wake_us);
+    // PSPRECOMP_EAGER_CLOCK=1: waits push the shared clock forward by their whole length at once (before 11-18).
+    [[nodiscard]] static bool eager_clock();
     // Save states (2026-11-18): every thread, the ready/delayed queues and all sync objects (both directions).
     void serialize_state(psphost::StateIO &io);
     [[nodiscard]] std::int32_t current_uid() const noexcept { return current_uid_; }
@@ -35,7 +40,8 @@ private:
     // until no thread is ready, then it runs again ("time passes" only when
     // the CPU is idle, or after kDelaySwitches switches). Returns 0 to the
     // caller when it resumes. Same as PW's (S2c, review 10/28).
-    void delay_yield(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx);
+    bool delay_yield(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx, std::uint64_t wake_us = 0u,
+                     bool reenter = false);
     // SleepThread(CB): block (State::Asleep) until sceKernelWakeupThread, or
     // return at once if a wakeup is already pending.
     void sleep_thread(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx);
@@ -59,6 +65,7 @@ private:
         psprecomp::AllegrexContext context{};
         std::uint32_t wakeup{0u}; // sceKernelWakeupThread markers (PW S2b).
         std::uint64_t delay_due{0u}; // Delayed: switches_ value at which the delay is over
+        std::uint64_t wake_us{0u};   // Delayed: virtual time the wait ends (0: any idle round). Not saved.
     };
 
     struct ReadyItem {
@@ -98,6 +105,12 @@ private:
     // when nothing else is ready).
     std::uint64_t switches_{0u};
     static constexpr std::uint64_t kDelaySwitches = 64u;
+    static constexpr std::uint64_t kTimedDelaySwitches = 512u;
+    static constexpr std::uint64_t kBusyWakeAheadUs = 2000u;      // busy rounds may end a timed wait this early
+    static constexpr std::uint64_t kDelayLineSlackUs = 100000u;   // DelayThread timeline reset when this far off
+    std::unordered_map<std::int32_t, std::uint64_t> delay_line_;  // per-thread DelayThread timeline (not saved)
+    std::unordered_map<std::int32_t, int> vblank_phase_;          // timed vblank-wait re-entry state (not saved)
+    std::size_t later_count_{};
     void dump_threads(const char *why) const;
     std::unordered_map<std::int32_t, std::vector<std::int32_t>> end_waiters_;
     struct Semaphore { std::int32_t count{}; std::int32_t maximum{}; std::vector<std::int32_t> waiting; };

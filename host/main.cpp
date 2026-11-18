@@ -7,6 +7,7 @@
 #include "savedata.hpp"
 #include "overlays.hpp"
 #include "movie_skip.hpp"
+#include "movie_player.hpp"
 #include "display_state.hpp"
 #include "ge_display.hpp"
 #include "interrupts.hpp"
@@ -678,7 +679,11 @@ int main(int argc, char **argv) {
                 ctx.set_gpr(2u, ctx.gpr[4u] == 0u ? 0u : 0x80000107u);
             });
         bbs::register_savedata_hle(runtime);
-        bbs::register_movie_skip(runtime);   // sceMpeg (host/movie_skip.cpp)
+#if defined(__ANDROID__)
+        bbs::register_movie_player(runtime);   // sceMpeg playback (host/movie_player.cpp; PSPRECOMP_MOVIE_SKIP=1 skips)
+#else
+        bbs::register_movie_skip(runtime);     // sceMpeg (host/movie_skip.cpp); the PC build has no decoder yet
+#endif
         runtime.register_hle("UtilsForUser", 0xC2DF770Eu,   // sceKernelIcacheInvalidateRange
             [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
                 // The game copied code (an overlay): drop the functions compiled for what was there before.
@@ -927,7 +932,14 @@ int main(int argc, char **argv) {
                 AudioChannel &c = (*channels)[ch];
                 const std::uint64_t now = psphost::virtual_time_us();
                 const std::uint64_t start = next_start(c, now);
-                if (blocking && psphost::deliver_alarms(ctx, start > now ? start - now : 0u)) return;
+                if (blocking && bbs::ThreadManager::eager_clock()) {
+                    if (psphost::deliver_alarms(ctx, start > now ? start - now : 0u)) return;
+                } else if (blocking) {
+                    // Timed (2026-11-18): park until the buffer's start, then this import runs again. The clock
+                    // moves there only when nothing else can run, so other threads' waits overlap with this one.
+                    if (psphost::deliver_alarms(ctx, 0u)) return;
+                    if (start > now && thread_manager->wait_until(rt, ctx, start)) return;
+                }
                 const bool stereo = c.format != 0x10u;
                 const std::size_t bytes = static_cast<std::size_t>(c.samples) * (stereo ? 4u : 2u);
                 const std::uint64_t at = queue(c, c.samples);
@@ -1011,7 +1023,13 @@ int main(int argc, char **argv) {
             runtime.register_hle("sceAudio", 0x2D53F36Eu, block_output2);   // sceAudioOutput2OutputBlocking
             runtime.register_hle("sceAudio", 0xB011922Fu, ok);      // sceAudioGetChannelRestLength: 0 = drained
             runtime.register_hle("sceAudio", 0x95FD0C2Du, ok);      // sceAudioChangeChannelConfig
-            runtime.register_hle("sceAudio", 0xB7E1D8E7u, ok);      // sceAudioChangeChannelVolume
+            runtime.register_hle("sceAudio", 0xB7E1D8E7u,   // sceAudioChangeChannelVolume(ch, l, r)
+                [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                    static const bool diag = std::getenv("PSPRECOMP_AUDIO_DIAG") != nullptr;
+                    if (diag) std::cerr << "[audio] ChangeChannelVolume ch=" << ctx.gpr[4u] << " l=" << ctx.gpr[5u]
+                                        << " r=" << ctx.gpr[6u] << " ra=" << std::hex << ctx.gpr[31u] << std::dec << "\n";
+                    ctx.set_gpr(2u, 0u);
+                });
             runtime.register_hle("sceAudio", 0x01562BA3u,   // sceAudioOutput2Reserve(samples): one argument
                 [channels](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
                     const std::uint32_t samples = ctx.gpr[4u] & 0x7FFFFFFFu;
@@ -1163,6 +1181,9 @@ int main(int argc, char **argv) {
             psprecomp::set_runtime_thread_identity(threads.current_uid(), threads.current_name());
             bbs::overlays_code_changed(rt, 0x08000000u, 0x02000000u);
             vcs::audio_output_rebase(psphost::virtual_time_us());   // sound after a load (11-18)
+#if defined(__ANDROID__)
+            bbs::movie_after_state_load();   // a movie playing across a load ends
+#endif
         };
         threads.set_safe_point_hook([&, save_state_to, load_state_from, after_load](
                                         psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
