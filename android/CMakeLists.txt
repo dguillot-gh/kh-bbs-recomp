@@ -64,7 +64,7 @@ set(HOST_SOURCES
     ${RT}/src/decoder.cpp ${RT}/src/deflate.cpp ${RT}/src/elf32.cpp ${RT}/src/guest_memory.cpp
     ${RT}/src/nid_registry.cpp ${RT}/src/program_analysis.cpp ${RT}/src/runtime.cpp ${RT}/src/sha256.cpp
     ${HS}/ge_display.cpp ${HS}/guest_calls.cpp ${HS}/interrupts.cpp
-    ${VCS}/framebuffer_capture.cpp ${GE_RENDERER_PATCHED} ${VCS}/ge_gpu_backend_vulkan.cpp ${VCS}/vcs_config.cpp
+    ${VCS}/framebuffer_capture.cpp ${GE_RENDERER_PATCHED} ${VCS}/texture_replacer.cpp ${VCS}/ge_gpu_backend_vulkan.cpp ${VCS}/vcs_config.cpp
     ${VCS}/vcs_fps_overlay.cpp ${VCS}/vcs_project2dfx.cpp ${VCS}/vcs_project2dfx_lights.cpp
     ${VCS}/vcs_draw_distance_patch.cpp ${VCS}/vcs_runtime_log.cpp ${VCS}/audio_output_android.cpp
     ${BBS_REPO}/host/main.cpp ${BBS_REPO}/host/disc_io.cpp ${BBS_REPO}/host/savedata.cpp ${BBS_REPO}/host/overlays.cpp ${BBS_REPO}/host/movie_skip.cpp ${BBS_REPO}/host/sas_hle.cpp ${BBS_REPO}/host/atrac_hle.cpp

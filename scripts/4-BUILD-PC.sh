@@ -54,7 +54,7 @@ for f in "$REPO"/host/*.cpp; do
 done
 rm -f "$OUT"/lib/ge_gpu_backend_*.o
 for f in "$H"/*.cpp "$V"/framebuffer_capture.cpp "$V"/vcs_config.cpp "$V"/vcs_fps_overlay.cpp "$V"/vcs_project2dfx.cpp \
-         "$V"/vcs_project2dfx_lights.cpp "$V"/vcs_draw_distance_patch.cpp "$V"/vcs_runtime_log.cpp "$V/$GE_FILE" \
+         "$V"/vcs_project2dfx_lights.cpp "$V"/vcs_draw_distance_patch.cpp "$V"/vcs_runtime_log.cpp "$V"/texture_replacer.cpp "$V/$GE_FILE" \
          "$RUNTIME"/src/*.cpp; do
   "$HOST_CXX" -std=c++20 -O2 -w -c $INC "$f" -o "$OUT/lib/$(basename "$f" .cpp).o"
 done

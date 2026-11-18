@@ -66,7 +66,7 @@ endif()
 # vcs_draw_distance_patch only runs from install_project2dfx, which we never call.
 set(PSP_VCS_HOST_DIR "${PSPRECOMP_RUNTIME_DIR}/profiles/vcs/host")
 set(PSP_VCS_RENDERER_SOURCES)
-foreach(name framebuffer_capture ge_renderer ge_gpu_backend_dx12 vcs_config
+foreach(name framebuffer_capture ge_renderer texture_replacer ge_gpu_backend_dx12 vcs_config
         vcs_fps_overlay vcs_project2dfx vcs_project2dfx_lights
         vcs_draw_distance_patch vcs_runtime_log audio_output)
     list(APPEND PSP_VCS_RENDERER_SOURCES "${PSP_VCS_HOST_DIR}/${name}.cpp")

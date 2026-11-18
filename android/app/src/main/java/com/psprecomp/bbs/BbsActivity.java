@@ -55,11 +55,17 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
     static native int nativeStateResult();
     static native void nativeSetPaused(boolean paused);
     static native long nativeFlipCount();
+    static native boolean nativeSetTextureReplacement(boolean on);
+    static native void nativeSet60Fps(boolean on);
 
     private boolean started;
     private TouchPad pad;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean menuOpen, stateBusy, activityPaused;
+    /** Texture pack (PPSSPP textures.ini) in getExternalFilesDir()/textures; on/off from the menu. */
+    private boolean texturePack = true, texturePackLoaded;
+    /** 60 FPS mode (experimental): keeps BBS's vblank frame-interval word at 0 (native, see main.cpp). */
+    private boolean fps60;
 
     // FPS: game frame flips per half second.
     private long lastFlips = -1, lastFlipTime;
@@ -146,12 +152,21 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
         File files = getFilesDir();
         try (FileOutputStream out = new FileOutputStream(new File(files, "VCSNative.ini"))) {
             // The FPS counter is drawn by TouchPad now (movable, toggled from the menu), not the Vulkan overlay.
-            out.write("[Rendering]\nBackend=Vulkan\nNativeGE=true\n".getBytes("UTF-8"));
+            // Internal resolution (menu "Resolution"): the Vulkan GE backend renders at 480x272 x scale
+            // (vcs_config Rendering.InternalResolutionMode/InternalScale). Read once at startup.
+            int scale = Math.max(1, Math.min(4, settings.getInt("render_scale", 1)));
+            String rendering = "[Rendering]\nBackend=Vulkan\nNativeGE=true\n"
+                    + (scale > 1 ? "InternalResolutionMode=Scale\nInternalScale=" + scale + "\n" : "");
+            out.write(rendering.getBytes("UTF-8"));
         } catch (Exception e) {
             Log.e(TAG, "VCSNative.ini", e);
         }
         started = nativeStart(files.getAbsolutePath(), eboot.getAbsolutePath(), disc.getAbsolutePath(),
                 4_000_000_000_000L);
+        texturePack = settings.getBoolean("texture_pack", true);
+        if (started) texturePackLoaded = nativeSetTextureReplacement(texturePack);
+        fps60 = settings.getBoolean("fps60", false);
+        if (started) nativeSet60Fps(fps60);
         updatePause();
     }
 
@@ -201,6 +216,9 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
                 (invertCamX ? "✓ " : "   ") + "Invert camera left/right",
                 (invertCamY ? "✓ " : "   ") + "Invert camera up/down",
                 "Stick deadzone… (" + Math.round(deadzone * 100) + "%)",
+                (texturePack ? "✓ " : "   ") + "HD texture pack" + (texturePackLoaded ? "" : " (none in files/textures)"),
+                (fps60 ? "✓ " : "   ") + "60 FPS mode (experimental)",
+                "Resolution… (" + settings.getInt("render_scale", 1) + "x)",
         };
         AlertDialog d = dialog().setTitle("Birth by Sleep").setItems(items, (x, which) -> {
             switch (which) {
@@ -216,10 +234,54 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
                 case 7: invertCamX = !invertCamX; settings.edit().putBoolean("invert_cam_x", invertCamX).apply(); pushAnalog(); break;
                 case 8: invertCamY = !invertCamY; settings.edit().putBoolean("invert_cam_y", invertCamY).apply(); pushAnalog(); break;
                 case 9: openDeadzone(); break;
+                case 10:
+                    texturePack = !texturePack;
+                    settings.edit().putBoolean("texture_pack", texturePack).apply();
+                    texturePackLoaded = nativeSetTextureReplacement(texturePack);
+                    break;
+                case 11:
+                    fps60 = !fps60;
+                    settings.edit().putBoolean("fps60", fps60).apply();
+                    nativeSet60Fps(fps60);
+                    break;
+                case 12: openResolution(); break;
                 default: break;
             }
         }).create();
         showDialog(d);
+    }
+
+    /** Internal render resolution, 1x (PSP 480x272) to 4x. Applied at startup, so offer a restart. */
+    private void openResolution() {
+        final int current = Math.max(1, Math.min(4, settings.getInt("render_scale", 1)));
+        String[] choices = {
+                "1x — PSP original (480×272)",
+                "2x (960×544)",
+                "3x (1440×816)",
+                "4x (1920×1088)",
+        };
+        AlertDialog d = dialog().setTitle("Resolution").setSingleChoiceItems(choices, current - 1, (x, which) -> {
+            x.dismiss();
+            int scale = which + 1;
+            if (scale == current) return;
+            settings.edit().putInt("render_scale", scale).apply();
+            AlertDialog r = dialog().setTitle("Restart to apply " + scale + "x?")
+                    .setMessage("The game restarts. Save a state first if you want to keep your progress.")
+                    .setPositiveButton("Restart now", (y, w) -> restartApp())
+                    .setNegativeButton("Later", null).create();
+            showDialog(r);
+        }).setNegativeButton("Back", null).create();
+        showDialog(d);
+    }
+
+    /** The native game can only start once per process: relaunch the activity in a fresh process. */
+    private void restartApp() {
+        // Start the activity while we're still in the foreground, then exit: the system brings it up in a
+        // new process.
+        android.content.Intent intent = android.content.Intent.makeRestartActivityTask(
+                new android.content.ComponentName(this, BbsActivity.class));
+        startActivity(intent);
+        Runtime.getRuntime().exit(0);
     }
 
     private File stateFile(int slot) {

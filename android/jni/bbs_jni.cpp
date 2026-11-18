@@ -2,6 +2,7 @@
 // on a big-stack game thread, hands the SurfaceView's ANativeWindow to the Vulkan GE backend, routes
 // stdout/stderr to logcat (tag "BBS") and maps touch to PSP buttons.
 #include "ge_gpu_backend.hpp"
+#include "texture_replacer.hpp"
 
 #include <android/log.h>
 #include <android/native_window_jni.h>
@@ -26,6 +27,7 @@ extern std::mutex g_bbs_state_mutex;
 extern std::string g_bbs_state_path;
 extern std::atomic<bool> g_bbs_paused;
 extern std::atomic<std::uint64_t> g_bbs_flip_count;
+extern std::atomic<bool> g_bbs_60fps;
 
 namespace {
 std::atomic<bool> g_started{false};
@@ -125,6 +127,17 @@ extern "C" JNIEXPORT void JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeSetPa
     g_bbs_paused.store(p == JNI_TRUE);
 }
 
+// In-game menu toggle for the texture pack. Returns whether a pack is loaded.
+extern "C" JNIEXPORT jboolean JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeSetTextureReplacement(JNIEnv *, jclass,
+                                                                                                   jboolean on) {
+    texrepl::set_enabled(on == JNI_TRUE);
+    return texrepl::pack_loaded() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeSet60Fps(JNIEnv *, jclass, jboolean on) {
+    g_bbs_60fps.store(on == JNI_TRUE);
+}
+
 extern "C" JNIEXPORT jlong JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeFlipCount(JNIEnv *, jclass) {
     return static_cast<jlong>(g_bbs_flip_count.load(std::memory_order_relaxed));
 }
@@ -165,6 +178,13 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeS
             std::cout << "[bbs-android] env " << l << std::endl;
         }
         std::fclose(f);
+    }
+    // Texture pack (PPSSPP textures.ini format): the user copies it to <external files>/textures/.
+    {
+        const char *tex_dir = std::getenv("PSPRECOMP_TEX_DIR");
+        setenv("PSPRECOMP_TEX_DUMP_FILE", (dir + "/tex-keys.txt").c_str(), 0);
+        texrepl::set_directory(tex_dir != nullptr ? std::string(tex_dir)
+                                                  : eboot_path.substr(0, eboot_path.find_last_of('/') + 1) + "textures");
     }
     auto *game = new GameArgs{{dir + "/bbs", str(eboot), str(disc), std::to_string(max_dispatches)}};
     pthread_attr_t attr;

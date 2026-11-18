@@ -69,6 +69,12 @@ std::mutex g_bbs_state_mutex;
 std::string g_bbs_state_path;              // guarded by g_bbs_state_mutex
 std::atomic<bool> g_bbs_paused{false};
 std::atomic<std::uint64_t> g_bbs_flip_count{0u};  // sceDisplaySetFrameBuf calls (FPS counter in the app)
+// 60 FPS mode (2026-11-18, experimental). BBS's vblank sub-interrupt handler 0x0880919C reads a frame-mode word
+// at 0x09F22E08 (getter 0x088072A4): 1 in gameplay = wake FlipThread only every second vblank (30 FPS), 0 = every
+// vblank. Like the Final Mix CWCheat (_L 0x21725EC8 0 writes the same kind of word, at the FM address), keep it at
+// 0 while the option is on. Only 1 is rewritten; other modes are left alone.
+std::atomic<bool> g_bbs_60fps{false};
+constexpr std::uint32_t kBbsFrameModeAddress = 0x09F22E08u;
 // Set where the audio channels live (a nested scope in main), so the state code can reach them.
 std::function<void(psphost::StateIO &)> g_bbs_audio_state;
 // [bbs-camera-mod] Right-stick camera, the idea of RemasteredControls KHBBS by TheFloW (GPL-3; re-implemented
@@ -603,6 +609,8 @@ int main(int argc, char **argv) {
                 // (no-op on the software path). 2026-11-16.
                 psphost::ge_display_present_gpu_frame(rt, buffer, stride, format, psphost::vblank_count());
                 g_bbs_flip_count.fetch_add(1u, std::memory_order_relaxed);
+                if (g_bbs_60fps.load(std::memory_order_relaxed) && rt.memory().load32(kBbsFrameModeAddress) == 1u)
+                    rt.memory().store32(kBbsFrameModeAddress, 0u);
                 // Seal audio up to now even on frames nothing was submitted (silence, not underrun).
                 vcs::audio_output_advance(psphost::virtual_time_us());
                 ctx.set_gpr(2u, 0u);
