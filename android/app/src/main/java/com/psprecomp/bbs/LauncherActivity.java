@@ -108,13 +108,24 @@ public class LauncherActivity extends Activity {
 
     // ---- screen ----
 
+    /** This build is for Final Mix (ULJM-05775), not the US disc. */
+    private boolean finalMix() { return "ULJM-05775".equals(IsoInstaller.gameIdFor(this)); }
+
     private void build() {
         root.removeAllViews();
         File data = data();
         boolean installed = data != null && IsoInstaller.installed(data);
 
-        if (installed) {
-            Bitmap pic = BitmapFactory.decodeFile(new File(IsoInstaller.disc(data), "PSP_GAME/PIC1.PNG").getAbsolutePath());
+        // A background packed into this build (build-android.sh LAUNCHER_BG) wins; else the disc's own PIC1.PNG.
+        Bitmap own = null;
+        try (java.io.InputStream s = getAssets().open("launcher_bg")) {
+            own = BitmapFactory.decodeStream(s);
+        } catch (java.io.IOException ignored) {
+        }
+        if (own != null || installed) {
+            Bitmap pic = own != null ? own
+                    : BitmapFactory.decodeFile(new File(IsoInstaller.disc(data), "PSP_GAME/PIC1.PNG").getAbsolutePath());
+            final boolean ownBg = own != null;
             if (pic != null) {
                 // The logo sits near the top of PIC1 (centre about 300,62 of 480x272). Place it in the middle of the
                 // screen height and of the free area right of the menu; the picture's edges that come into view are
@@ -124,11 +135,21 @@ public class LauncherActivity extends Activity {
                 final View top = new View(this);
                 top.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
                         new int[]{0xFF000000, 0x00000000}));
+                // Final Mix's PIC1 is a full scene with the logo top-right: fill the screen, right-aligned, so the
+                // logo and the characters stay in view (no black band, no top fade).
+                final boolean scene = ownBg || finalMix();
                 ImageView bg = new ImageView(this) {
                     @Override protected void onLayout(boolean changed, int l, int t, int r, int b) {
                         super.onLayout(changed, l, t, r, b);
                         final int w = r - l, h = b - t;
                         float scale = Math.max(w / (float) pic.getWidth(), h / (float) pic.getHeight());
+                        if (scene) {
+                            android.graphics.Matrix m = new android.graphics.Matrix();
+                            m.setScale(scale, scale);
+                            m.postTranslate(w - pic.getWidth() * scale, (h - pic.getHeight() * scale) / 2f);
+                            setImageMatrix(m);
+                            return;
+                        }
                         float logoX = pic.getWidth() * (300f / 480f), logoY = pic.getHeight() * (62f / 272f);
                         float targetX = menuWidth + (w - menuWidth) / 2f, targetY = h / 2f;
                         android.graphics.Matrix m = new android.graphics.Matrix();
@@ -169,14 +190,20 @@ public class LauncherActivity extends Activity {
 
         TextView title = text("Kingdom Hearts\nBirth by Sleep", 28, Color.WHITE, true);
         column.addView(title);
+        if (finalMix()) {
+            TextView fm = text("FINAL MIX", 18, 0xFFE8C46A, true);
+            fm.setLetterSpacing(0.25f);
+            fm.setPadding(0, dp(2), 0, 0);
+            column.addView(fm);
+        }
         TextView sub = text("Native Android port", 14, 0xFFB8C7E0, false);
         sub.setPadding(0, dp(2), 0, dp(16));
         column.addView(sub);
 
         if (!installed) {
             column.addView(text("First-time setup", 20, Color.WHITE, true));
-            TextView info = text("Choose the ISO of your own Kingdom Hearts Birth by Sleep UMD (USA, " + IsoInstaller.GAME_ID
-                    + "). The app copies the game files and decrypts the game program on this phone. Nothing is "
+            TextView info = text("Choose the ISO of your own " + IsoInstaller.gameName(this)
+                    + " disc. The app copies the game files and decrypts the game program on this phone. Nothing is "
                     + "downloaded. Needs about 4 GB of free space (the disc image, its files, and decrypted data).", 15, 0xFFDDDDDD, false);
             info.setPadding(0, dp(8), 0, dp(20));
             column.addView(info);

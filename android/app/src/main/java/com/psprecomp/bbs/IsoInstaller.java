@@ -26,7 +26,23 @@ import java.util.List;
  * Nothing is downloaded; nothing from the disc ships with the app.
  */
 final class IsoInstaller {
-    static final String GAME_ID = "ULUS-10505";
+    /** The disc this build's compiled code is for: manifest meta-data bbs.game_id (build-android.sh GAME_ID). */
+    static String gameIdFor(Context context) {
+        try {
+            android.content.pm.ApplicationInfo ai = context.getPackageManager().getApplicationInfo(
+                    context.getPackageName(), android.content.pm.PackageManager.GET_META_DATA);
+            String id = ai.metaData != null ? ai.metaData.getString("bbs.game_id") : null;
+            if (id != null && !id.isEmpty()) return id;
+        } catch (Exception ignored) {
+        }
+        return "ULUS-10505";
+    }
+    /** "Kingdom Hearts Birth by Sleep, USA (ULUS-10505)" or the Final Mix equivalent. */
+    static String gameName(Context context) {
+        String id = gameIdFor(context);
+        return "ULJM-05775".equals(id) ? "Kingdom Hearts Birth by Sleep Final Mix (" + id + ")"
+                : "Kingdom Hearts Birth by Sleep, USA (" + id + ")";
+    }
     private static final int SECTOR = 2048;
 
     interface Progress { void update(String what, long done, long total); }
@@ -96,8 +112,8 @@ final class IsoInstaller {
         walk(ch, pvd, 156, "", entries, 0);
         Entry umd = find(entries, "UMD_DATA.BIN");
         String id = umd == null ? null : new String(read(ch, umd.lba * SECTOR, 10), StandardCharsets.US_ASCII);
-        if (!GAME_ID.equals(id))
-            throw new SetupException("This port needs Kingdom Hearts Birth by Sleep, USA (" + GAME_ID + "). "
+        if (!gameIdFor(context).equals(id))
+            throw new SetupException("This build needs " + gameName(context) + ". "
                     + "This disc is " + (id == null ? "not a PSP game" : id) + ".");
         Entry ebootEntry = find(entries, "PSP_GAME/SYSDIR/EBOOT.BIN");
         if (ebootEntry == null) throw new SetupException("The disc has no PSP_GAME/SYSDIR/EBOOT.BIN.");
@@ -182,8 +198,38 @@ final class IsoInstaller {
             }
         }
 
-        progress.update("Decrypting the game program…", all, all);
-        decrypt(context, new File(staging, "PSP_GAME/SYSDIR/EBOOT.BIN"), new File(data, "EBOOT.BIN.dec.importing"));
+        // Fan-patched Final Mix images carry the program already decrypted: as EBOOT.BIN, or as EBOOT.OLD behind a
+        // small CFW loader (Prometheus) in EBOOT.BIN. Those are copied; a retail ~PSP EBOOT is decrypted.
+        File sys = new File(staging, "PSP_GAME/SYSDIR");
+        File out = new File(data, "EBOOT.BIN.dec.importing");
+        File plain = isElf(new File(sys, "EBOOT.OLD")) ? new File(sys, "EBOOT.OLD")
+                : isElf(new File(sys, "EBOOT.BIN")) ? new File(sys, "EBOOT.BIN") : null;
+        // A loader EBOOT.BIN is a small ELF too: prefer EBOOT.OLD when both are ELFs.
+        if (plain != null) {
+            progress.update("Copying the game program…", all, all);
+            copyFile(plain, out);
+        } else {
+            progress.update("Decrypting the game program…", all, all);
+            decrypt(context, new File(sys, "EBOOT.BIN"), out);
+        }
+    }
+
+    static boolean isElf(File f) {
+        if (!f.isFile()) return false;
+        byte[] m = new byte[4];
+        try (InputStream s = new FileInputStream(f)) {
+            return s.read(m) == 4 && m[0] == 0x7F && m[1] == 'E' && m[2] == 'L' && m[3] == 'F';
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    static void copyFile(File in, File out) throws IOException {
+        try (InputStream s = new FileInputStream(in); FileOutputStream o = new FileOutputStream(out)) {
+            byte[] b = new byte[1 << 20];
+            int n;
+            while ((n = s.read(b)) > 0) o.write(b, 0, n);
+        }
     }
 
     /** Runs the bundled decrypter (GPL-3.0, android/decrypt) as a separate process. */

@@ -76,7 +76,9 @@ std::atomic<std::uint64_t> g_bbs_flip_count{0u};  // sceDisplaySetFrameBuf calls
 // vblank. Like the Final Mix CWCheat (_L 0x21725EC8 0 writes the same kind of word, at the FM address), keep it at
 // 0 while the option is on. Only 1 is rewritten; other modes are left alone.
 std::atomic<bool> g_bbs_60fps{false};
-constexpr std::uint32_t kBbsFrameModeAddress = 0x09F22E08u;
+// Per disc (2026-11-19): US 0x09F22E08 (found here); Final Mix ULJM-05775 0x09F25EC8 (the CWCheat's address, not yet
+// checked on this build). Other discs: 0 = the 60 FPS option does nothing. Set from UMD_DATA.BIN at startup.
+std::uint32_t g_bbs_frame_mode_address = 0x09F22E08u;
 // Set where the audio channels live (a nested scope in main), so the state code can reach them.
 std::function<void(psphost::StateIO &)> g_bbs_audio_state;
 // [bbs-camera-mod] Right-stick camera, the idea of RemasteredControls KHBBS by TheFloW (GPL-3; re-implemented
@@ -172,6 +174,15 @@ int main(int argc, char **argv) {
     try {
         const std::filesystem::path elf_path = argv[1];
         const std::filesystem::path disc_root = argv[2];
+        {
+            std::ifstream umd(disc_root / "UMD_DATA.BIN", std::ios::binary);
+            char id[10] = {};
+            umd.read(id, 10);
+            const std::string disc_id(id, static_cast<std::size_t>(umd.gcount()));
+            g_bbs_frame_mode_address = disc_id == "ULUS-10505" ? 0x09F22E08u
+                                     : disc_id == "ULJM-05775" ? 0x09F25EC8u : 0u;
+            std::cerr << "[bbs] disc " << (disc_id.empty() ? std::string("?") : disc_id) << "\n";
+        }
         const std::uint64_t max_dispatches = argc == 4
             ? std::stoull(argv[3], nullptr, 0)
             : 10'000'000u;
@@ -204,6 +215,13 @@ int main(int argc, char **argv) {
                 compiled_sdk_version = ctx.gpr[4u];
                 ctx.set_gpr(2u, 0u);
             });
+        // Final Mix (ULJM-05775) was built with a newer SDK: 603_605 (seen 2026-11-19, arg 0x05000010) and 606.
+        for (const std::uint32_t nid : {0x1B4217BCu, 0x358CA1BBu})
+            runtime.register_hle("SysMemUserForUser", nid,
+                [&compiled_sdk_version](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
+                    compiled_sdk_version = ctx.gpr[4u];
+                    ctx.set_gpr(2u, 0u);
+                });
         runtime.register_hle("SysMemUserForUser", 0xF77D77CBu,
             [&compiler_version](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
                 compiler_version = ctx.gpr[4u];
@@ -217,6 +235,21 @@ int main(int argc, char **argv) {
                     for (std::uint32_t i = 0; i < size; ++i) rt.memory().store8(dest + i, value);
                 ctx.set_gpr(2u, dest);
             });
+        // sceKernelMemcpy(dest, src, size) -> dest. Final Mix calls it at boot (2026-11-19); memmove semantics so an
+        // overlapping copy is still right.
+        runtime.register_hle("Kernel_Library", 0x1839852Au,
+            [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+                const std::uint32_t dest = ctx.gpr[4u], src = ctx.gpr[5u], size = ctx.gpr[6u];
+                if (size != 0u && dest != src && rt.memory().contains(dest, size) && rt.memory().contains(src, size)) {
+                    if (dest < src)
+                        for (std::uint32_t i = 0; i < size; ++i) rt.memory().store8(dest + i, rt.memory().load8(src + i));
+                    else
+                        for (std::uint32_t i = size; i-- > 0;) rt.memory().store8(dest + i, rt.memory().load8(src + i));
+                }
+                ctx.set_gpr(2u, dest);
+            });
+        runtime.register_hle("scePower", 0x2085D15Du,   // scePowerGetBatteryLifePercent: always full
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 100u); });
         runtime.register_hle("Kernel_Library", 0x092968F4u,
             [&interrupt_state](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) {
                 // sceKernelCpuSuspendIntr returns the prior interrupt state.
@@ -610,8 +643,9 @@ int main(int argc, char **argv) {
                 psphost::ge_display_present_gpu_frame(rt, buffer, stride, format, psphost::vblank_count());
                 g_bbs_flip_count.fetch_add(1u, std::memory_order_relaxed);
                 psphost::perf::frame_tick();   // [perf] frame breakdown every 2 s (PSPRECOMP_PERF=1)
-                if (g_bbs_60fps.load(std::memory_order_relaxed) && rt.memory().load32(kBbsFrameModeAddress) == 1u)
-                    rt.memory().store32(kBbsFrameModeAddress, 0u);
+                if (g_bbs_60fps.load(std::memory_order_relaxed) && g_bbs_frame_mode_address != 0u
+                    && rt.memory().load32(g_bbs_frame_mode_address) == 1u)
+                    rt.memory().store32(g_bbs_frame_mode_address, 0u);
                 // Seal audio up to now even on frames nothing was submitted (silence, not underrun).
                 vcs::audio_output_advance(psphost::virtual_time_us());
                 ctx.set_gpr(2u, 0u);
@@ -693,10 +727,15 @@ int main(int argc, char **argv) {
         for (const std::uint32_t nid : {0xEBD177D6u /* scePowerSetClockFrequency */,
                                         0x737486F2u /* scePowerSetClockFrequency (alias) */,
                                         0x843FBF43u /* scePowerSetCpuClockFrequency */,
-                                        0xB8D7B3FBu /* scePowerSetBusClockFrequency */}) {
+                                        0xB8D7B3FBu /* scePowerSetBusClockFrequency */,
+                                        0x469989ADu /* scePowerSetClockFrequency (6.xx alias; Final Mix) */}) {
             runtime.register_hle("scePower", nid,   // CPU/bus clock: the host runs at its own speed
                 [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
         }
+        // scePower_A85880D0 (PPSSPP: IsPSPNonFat; Final Mix only). 0 = PSP-1000, so the game never counts on the
+        // slim's extra 32 MB, which this runtime's memory map doesn't have.
+        runtime.register_hle("scePower", 0xA85880D0u,
+            [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
         runtime.register_hle("sceUtility", 0xE49BFE92u,   // sceUtilityUnloadModule: pairs with LoadModule below
             [](psprecomp::Runtime &, psprecomp::AllegrexContext &ctx) { ctx.set_gpr(2u, 0u); });
         runtime.register_hle("sceUtility", 0x2A2B3DE0u,

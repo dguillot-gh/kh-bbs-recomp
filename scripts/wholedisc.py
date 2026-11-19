@@ -10,6 +10,7 @@ import json, os, re, struct, sys
 
 SKIP = {  # code on the disc that a port never runs
     "PSP_GAME/SYSDIR/BOOT.BIN": "unencrypted copy of the main executable",
+    "PSP_GAME/SYSDIR/EBOOT.BIN": "the main executable (compiled as main, not as an overlay; plain ELF on some discs)",
     "PSP_GAME/SYSDIR/OPNSSMP.BIN": "PSP system module (opening/splash), not game code",
     "PSP_GAME/SYSDIR/UPDATE": "PSP firmware updater",
 }
@@ -78,6 +79,18 @@ def main_pointers(eboot, prof, out):
                 if lo <= v < hi and v % 4 == 0:
                     seeds.add(v & 0xFFFFFFFF)
                 break
+    # Direct calls/jumps (jal/j) from the main program's code into the window: Final Mix calls overlay code this way
+    # (e.g. jal 0x08B6F8A4 from 0x08A58004, 2026-11-19); the US disc never did. Code segment only, so data words
+    # that happen to look like jal aren't taken.
+    phoff = struct.unpack_from("<I", data, 28)[0]
+    _, seg_off, seg_va, _, seg_filesz = struct.unpack_from("<5I", data, phoff)
+    for k in range(seg_off // 4, (seg_off + seg_filesz) // 4):
+        w = words[k]
+        if w >> 26 in (0x02, 0x03):
+            pc = seg_va + (k * 4 - seg_off)
+            v = (pc & 0xF0000000) | ((w & 0x03FFFFFF) << 2)
+            if lo <= v < hi:
+                seeds.add(v)
     with open(out, "w") as fh:
         fh.writelines(f"{s:08X}\n" for s in sorted(seeds))
     print(f"main-pointers: {len(seeds)} candidate overlay entries")

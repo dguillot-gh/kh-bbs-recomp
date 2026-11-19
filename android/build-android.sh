@@ -7,6 +7,11 @@
 #   JAVA_HOME                           JDK 17+
 #   PYTHON                              Python 3 (default: python3 / python on PATH)
 #   CORPUS                              generated code (default: <repo>/game/generated, made by scripts/3-GENERATE.sh)
+#   APP_ID APP_LABEL                    package (default com.psprecomp.bbs) and app name (KH BBS Recomp); a second
+#                                       build (e.g. Final Mix) with its own APP_ID installs beside the first
+#   ICON_IMAGE                          optional PNG for the launcher icon (default: the logo cut from PIC1.PNG)
+#   LAUNCHER_BG                         optional JPG/PNG for the launcher background (default: the disc's PIC1.PNG)
+#   GAME_ID                             disc the generated code is for (ULUS-10505; Final Mix: ULJM-05775)
 #   BUILD_DIR JOBS OPT                  build folder (default <repo>/build/android), parallel jobs (4), -O for the
 #                                       generated units (-O1)
 # Without Gradle: the SDK's aapt2 + javac + d8 + zipalign + apksigner. Signed with ~/.android/debug.keystore
@@ -70,11 +75,23 @@ if [ "$WHAT" != lib ]; then
   fi
   O=$BUILD/apk; rm -rf "$O"; mkdir -p "$O/classes" "$O/dex" "$O/lib/arm64-v8a"
   # Launcher icon: the logo from the disc's PSP_GAME/PIC1.PNG, made here so nothing from the disc is committed.
-  "$JDK/bin/java$X" "$(w "$HERE/tools/MakeIcon.java")" "$(w "$(dirname "$CORPUS")/disc-files/PSP_GAME/PIC1.PNG")" "$(w "$O/res")"
+  # The logo's box in PIC1: top-centre on the US disc (MakeIcon's default), top-right on Final Mix.
+  ICON_BOX=; [ "${GAME_ID:-}" = ULJM-05775 ] && ICON_BOX=312,14,478,134
+  # ICON_IMAGE=<png>: use a picture of your own instead (kept outside the repo; never commit game art).
+  [ -n "${ICON_IMAGE:-}" ] && [ -f "$ICON_IMAGE" ] && ICON_BOX=$(w "$ICON_IMAGE")
+  "$JDK/bin/java$X" "$(w "$HERE/tools/MakeIcon.java")" "$(w "$(dirname "$CORPUS")/disc-files/PSP_GAME/PIC1.PNG")" "$(w "$O/res")" "$ICON_BOX"
   "$BT/aapt2$X" compile --dir "$(w "$O/res")" -o "$(w "$O/res.zip")"
-  "$BT/aapt2$X" link -o "$(w "$O/base.apk")" -I "$(w "$JAR")" -R "$(w "$O/res.zip")" \
-    --manifest "$(w "$HERE/app/src/main/AndroidManifest.xml")" --min-sdk-version 26 --target-sdk-version 35 \
-    --version-code 1 --version-name 0.1.0 --rename-manifest-package com.psprecomp.bbs
+  sed -e "s|android:label=\"KH BBS Recomp\"|android:label=\"${APP_LABEL:-KH BBS Recomp}\"|" \
+      -e "s|</application>|    <meta-data android:name=\"bbs.game_id\" android:value=\"${GAME_ID:-ULUS-10505}\" />\n    </application>|" \
+    "$HERE/app/src/main/AndroidManifest.xml" > "$O/AndroidManifest.xml"
+  # LAUNCHER_BG=<jpg|png>: launcher background of your own, packed as assets/launcher_bg (kept outside the repo).
+  ASSETS=()
+  if [ -n "${LAUNCHER_BG:-}" ] && [ -f "$LAUNCHER_BG" ]; then
+    mkdir -p "$O/assets" && cp "$LAUNCHER_BG" "$O/assets/launcher_bg" && ASSETS=(-A "$(w "$O/assets")")
+  fi
+  "$BT/aapt2$X" link -o "$(w "$O/base.apk")" -I "$(w "$JAR")" -R "$(w "$O/res.zip")" "${ASSETS[@]}" \
+    --manifest "$(w "$O/AndroidManifest.xml")" --min-sdk-version 26 --target-sdk-version 35 \
+    --version-code 1 --version-name 0.1.0 --rename-manifest-package "${APP_ID:-com.psprecomp.bbs}"
   "$JDK/bin/javac$X" -source 17 -target 17 -nowarn -encoding UTF-8 -cp "$(w "$JAR")" \
     -d "$(w "$O/classes")" $(find "$HERE/app/src/main/java" -name '*.java' | while read f; do w "$f"; done)
   "$JDK/bin/java$X" -cp "$(w "$BT/lib/d8.jar")" com.android.tools.r8.D8 --release --min-api 26 \

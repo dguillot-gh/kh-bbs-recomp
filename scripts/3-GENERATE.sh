@@ -42,6 +42,10 @@ for round in 1 2 3; do
   [ -f "$GAME_DIR/generated.new/generated_registry.cpp" ] || fail "the recompiler did not finish"
   rm -rf "$GAME_DIR/generated"; mv "$GAME_DIR/generated.new" "$GAME_DIR/generated"
 done
+# Right-stick camera hooks (host/main.cpp) for the disc this is (US or Final Mix).
+DISC_ID=$(head -c 10 "$DISC/UMD_DATA.BIN")
+"$PYTHON" -I "$(native "$REPO/scripts/patch-camera-mod.py")" "$(native "$GAME_DIR/generated")" "$DISC_ID" \
+  || echo "warning: no right-stick camera hooks for $DISC_ID"
 mkdir -p "$REPO/build"
 "$PYTHON" -I "$(native "$REPO/scripts/wholedisc.py")" report "$(native "$GAME_DIR/wholedisc.json")" \
   "$(native "$GAME_DIR/generated")" "$(native "$GAME_DIR/overlays")" "$(native "$REPO/build/wholedisc-report.txt")"

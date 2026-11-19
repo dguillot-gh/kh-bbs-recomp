@@ -21,11 +21,16 @@ namespace {
 struct Module {
     const OverlayInfo *info;
     std::uint32_t vaddr{};
+    std::uint32_t end{};              // vaddr + memsz
     std::vector<std::uint8_t> bytes;  // the loadable segment's file bytes
 };
 std::vector<Module> g_modules;
 std::uint32_t g_window_start = 0xFFFFFFFFu, g_window_end = 0u;
-const Module *g_loaded = nullptr;
+// Overlays registered right now. The US disc loads one at a time (all share 0x08B8BF08); Final Mix can hold two side
+// by side (MENU_CAMP at 0x08B6EE80 ends where CAMP_MAIN starts, 0x08B799D0), so any set of non-overlapping ones.
+std::vector<const Module *> g_loaded;
+
+bool overlaps(const Module &m, std::uint32_t start, std::uint32_t end) { return m.vaddr < end && start < m.end; }
 
 bool trace() { return std::getenv("PSPRECOMP_OVERLAY_TRACE") != nullptr; }
 
@@ -42,6 +47,7 @@ bool read_module(const std::filesystem::path &path, Module &m) {
         const std::uint32_t off = u32(p + 4), vaddr = u32(p + 8), filesz = u32(p + 16), memsz = u32(p + 20);
         if (off + filesz > d.size()) return false;
         m.vaddr = vaddr;
+        m.end = vaddr + memsz;
         m.bytes.assign(d.begin() + off, d.begin() + off + filesz);
         g_window_start = std::min(g_window_start, vaddr);
         g_window_end = std::max(g_window_end, vaddr + memsz);
@@ -63,11 +69,14 @@ double match(psprecomp::Runtime &rt, const Module &m) {
     return static_cast<double>(same) / static_cast<double>(words);
 }
 
-void unload(psprecomp::Runtime &rt) {
-    if (g_loaded == nullptr) return;
-    rt.unregister_functions(g_window_start, g_window_end);
-    if (trace()) std::cerr << "[overlay] unloaded " << g_loaded->info->name << "\n";
-    g_loaded = nullptr;
+// Unregisters every loaded overlay that overlaps [start, end).
+void unload(psprecomp::Runtime &rt, std::uint32_t start, std::uint32_t end) {
+    for (auto it = g_loaded.begin(); it != g_loaded.end();) {
+        if (!overlaps(**it, start, end)) { ++it; continue; }
+        rt.unregister_functions((*it)->vaddr, (*it)->end);
+        if (trace()) std::cerr << "[overlay] unloaded " << (*it)->info->name << "\n";
+        it = g_loaded.erase(it);
+    }
 }
 
 bool on_missing(psprecomp::Runtime &rt, std::uint32_t pc) {
@@ -75,6 +84,7 @@ bool on_missing(psprecomp::Runtime &rt, std::uint32_t pc) {
     const Module *best = nullptr;
     double best_score = 0.0;
     for (const Module &m : g_modules) {
+        if (pc < m.vaddr || pc >= m.end) continue;   // only modules that cover this address
         const double s = match(rt, m);
         if (s > best_score) { best_score = s; best = &m; }
     }
@@ -83,16 +93,16 @@ bool on_missing(psprecomp::Runtime &rt, std::uint32_t pc) {
                   << (best ? best->info->name : "none") << " " << best_score << ")\n";
         return false;
     }
-    if (best == g_loaded) {  // loaded and still missing: a real gap in its corpus
+    if (std::find(g_loaded.begin(), g_loaded.end(), best) != g_loaded.end()) {  // loaded and still missing: a real gap
         bool listed = false;
         for (std::size_t i = 0; i < best->info->address_count; ++i) listed |= best->info->addresses[i] == pc;
         std::cerr << "[overlay] " << best->info->name << " is loaded but has nothing at " << psprecomp::hex32(pc)
                   << " (in its address list: " << (listed ? "yes" : "no") << ")\n";
         return false;
     }
-    unload(rt);
+    unload(rt, best->vaddr, best->end);
     best->info->register_functions(rt);
-    g_loaded = best;
+    g_loaded.push_back(best);
     std::cerr << "[overlay] loaded " << best->info->name << " (match " << best_score << ", at "
               << psprecomp::hex32(pc) << ")\n";
     return true;
@@ -107,11 +117,29 @@ void install_overlays(psprecomp::Runtime &runtime) {
         else std::cerr << "[overlay] cannot read " << path.string() << "\n";
     }
     psprecomp::set_runtime_missing_function_hook(&on_missing);
+    // The main program's generated units are 0x8000-byte buckets, and the last one can reach into the window
+    // (Final Mix: unit 109 = 0x08B6C000-0x08B74000, window from 0x08B6EE80). The runtime's dense unit table would
+    // hand window addresses to that main unit, which has no entry there ("invalid internal function entry", seen
+    // 2026-11-19 at 0x08B6F8A4) and never asks on_missing. Registering a non-generated function in a bucket poisons
+    // it (exact per-PC lookup from then on, also after unregistering), so do that for every bucket the window
+    // touches; overlay and main functions in those buckets still chain through the exact table.
+    if (g_window_start < g_window_end) {
+        const auto guard = [](psprecomp::Runtime &rt, psprecomp::AllegrexContext &ctx) {
+            rt.stop("overlay window guard reached at " + psprecomp::hex32(ctx.pc));
+        };
+        const std::uint32_t first = g_window_start & ~0x3FFFu;   // smallest bucket size the runtime uses (16 KiB)
+        for (std::uint32_t a = first; a < g_window_end; a += 0x4000u) {
+            const std::uint32_t at = a < g_window_start ? g_window_start : a;
+            // Nothing lives here yet: main code ends below the window and overlays register on first use.
+            runtime.register_function(at, guard, "overlay-window-guard");
+            runtime.unregister_functions(at, at + 4u);
+        }
+    }
     std::cerr << "[overlay] " << g_modules.size() << " modules, window " << psprecomp::hex32(g_window_start) << "-"
               << psprecomp::hex32(g_window_end) << "\n";
 }
 
 void overlays_code_changed(psprecomp::Runtime &runtime, std::uint32_t address, std::uint32_t size) {
-    if (address < g_window_end && address + size > g_window_start) unload(runtime);
+    if (address < g_window_end && address + size > g_window_start) unload(runtime, address, address + size);
 }
 } // namespace bbs

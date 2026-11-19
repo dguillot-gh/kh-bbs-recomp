@@ -36,6 +36,13 @@ done
 } >> "$REG"
 # Addresses below the window that the overlays call or jump to: the main executable's recompile must make them
 # function entries (PSPRECOMP_EXTRA_SEEDS=<this file> for 3-GENERATE).
-grep -ohE '(ctx\.pc = |, )0x08[0-9A-F]{6}u' "$OUT.new"/*/generated_unit_*.cpp | grep -oE '08[0-9A-F]{6}'   | awk '$1 >= "08804000" && $1 < "08B8BF08"' | sort -u > "$OUT.new/main_seeds.txt"
+# The window starts at the lowest overlay load address (0x08B8BF08 on the US disc, 0x08B6EE80 on Final Mix).
+elf_vaddr() {  # first program header's p_vaddr, as 8 uppercase hex digits
+  local phoff; phoff=$(od -A n -t u4 -j 28 -N 4 "$1" | tr -d ' ')
+  printf '%08X\n' "0x$(od -A n -t x4 -j $((phoff + 8)) -N 4 "$1" | tr -d ' ')"
+}
+WIN=$(for elf in "$MODDIR"/*.ELF; do elf_vaddr "$elf"; done | sort | head -1)
+echo "overlay window starts at 0x$WIN"
+grep -ohE '(ctx\.pc = |, )0x08[0-9A-F]{6}u' "$OUT.new"/*/generated_unit_*.cpp | grep -oE '08[0-9A-F]{6}'   | awk -v win="$WIN" '$1 >= "08804000" && $1 < win' | sort -u > "$OUT.new/main_seeds.txt"
 rm -rf "$OUT"; mv "$OUT.new" "$OUT"
 echo "overlays: ${NAMES[*]}"
