@@ -16,7 +16,6 @@ are re-implemented by [psp-native-runtime](https://github.com/dguillot-gh/psp-na
   </tr>
   <tr>
     <td><img src="docs/screenshots/training-rings.jpg" alt="Training ground at night"></td>
-    <td><img src="docs/screenshots/in-game-menu.jpg" alt="In-game menu"></td>
   </tr>
   <tr>
     <td><img src="docs/screenshots/launcher.jpg" alt="Launcher"></td>
