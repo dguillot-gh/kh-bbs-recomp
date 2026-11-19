@@ -36,6 +36,8 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
             PSP_LEFT = 0x80, PSP_L = 0x100, PSP_R = 0x200, PSP_TRIANGLE = 0x1000, PSP_CIRCLE = 0x2000,
             PSP_CROSS = 0x4000, PSP_SQUARE = 0x8000;
     private static final int STATE_SLOTS = 8;
+    /** From the launcher (Continue / Load state): load this save-state slot once the game is running. */
+    static final String EXTRA_LOAD_SLOT = "load_slot";
 
     private int touchButtons, keyButtons, hatButtons, triggerButtons;
     // Stick state in -1..1 (y down): touch stick, gamepad left/right sticks (raw; deadzone applied when sent).
@@ -146,7 +148,9 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
         File eboot = new File(data, "EBOOT.BIN.dec");
         File disc = new File(data, "disc-files");
         if (!eboot.isFile() || !disc.isDirectory()) {
-            Log.e(TAG, "Game data missing: push EBOOT.BIN.dec and disc-files/ to " + data);
+            Log.e(TAG, "Game data missing in " + data + ": back to the launcher for setup");
+            startActivity(new android.content.Intent(this, LauncherActivity.class));
+            finish();
             return;
         }
         File files = getFilesDir();
@@ -164,6 +168,16 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
         } catch (Exception e) {
             Log.e(TAG, "VCSNative.ini", e);
         }
+        // First-run setup: the disc image the launcher copied, and the GPL helper that decrypts BBS1-3.DAT the
+        // first time the game opens them (disc_io.cpp runs it as a separate process).
+        try {
+            File iso = IsoInstaller.anyIso(data);
+            if (iso != null) android.system.Os.setenv("PSPRECOMP_ISO", iso.getAbsolutePath(), false);
+            android.system.Os.setenv("PSPRECOMP_PGD_HELPER",
+                    new File(getApplicationInfo().nativeLibraryDir, "libbbsdecrypt.so").getAbsolutePath(), true);
+        } catch (Exception e) {
+            Log.e(TAG, "setenv", e);
+        }
         started = nativeStart(files.getAbsolutePath(), eboot.getAbsolutePath(), disc.getAbsolutePath(),
                 4_000_000_000_000L);
         texturePack = settings.getBoolean("texture_pack", true);
@@ -171,6 +185,16 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
         fps60 = settings.getBoolean("fps60", false);
         if (started) nativeSet60Fps(fps60);
         updatePause();
+        final int loadSlot = getIntent().getIntExtra(EXTRA_LOAD_SLOT, 0);
+        if (started && loadSlot > 0 && stateFile(loadSlot).isFile()) {
+            // Launcher "Continue": load once the game has shown a few frames (its threads and the safe point exist).
+            handler.postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (nativeFlipCount() < 30) { handler.postDelayed(this, 100); return; }
+                    runState(false, loadSlot);
+                }
+            }, 100);
+        }
     }
 
     @Override
@@ -224,6 +248,7 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
                 (fps60 ? "✓ " : "   ") + "60 FPS mode (experimental)",
                 "Resolution… (" + settings.getInt("render_scale", 1) + "x)",
                 "Aspect ratio… (" + (settings.getBoolean("widescreen", false) ? "Phone screen" : "16:9") + ")",
+                "Quit to launcher",
         };
         AlertDialog d = dialog().setTitle("Birth by Sleep").setItems(items, (x, which) -> {
             switch (which) {
@@ -247,6 +272,12 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
                     break;
                 case 12: openResolution(); break;
                 case 13: openAspect(); break;
+                case 14:
+                    showDialog(dialog().setTitle("Quit to the launcher?")
+                            .setMessage("Unsaved progress is lost. Save a state first if you want to keep it.")
+                            .setPositiveButton("Quit", (y, w) -> quitToLauncher())
+                            .setNegativeButton("Cancel", null).create());
+                    break;
                 default: break;
             }
         }).create();
@@ -416,6 +447,13 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
         android.content.Intent intent = android.content.Intent.makeRestartActivityTask(
                 new android.content.ComponentName(this, BbsActivity.class));
         startActivity(intent);
+        Runtime.getRuntime().exit(0);
+    }
+
+    /** The native game runs once per process: the launcher comes back in a fresh one. */
+    private void quitToLauncher() {
+        startActivity(android.content.Intent.makeRestartActivityTask(
+                new android.content.ComponentName(this, LauncherActivity.class)));
         Runtime.getRuntime().exit(0);
     }
 

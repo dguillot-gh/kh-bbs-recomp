@@ -12,8 +12,36 @@
 #include <string>
 #include <vector>
 
+#if defined(__ANDROID__) || defined(__linux__)
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
 namespace bbs {
 namespace {
+// Runs `$PSPRECOMP_PGD_HELPER pgd <in> <out> <key>` and waits for it (the game thread pauses, a few seconds per
+// file, the first time only). The helper writes <out>.part and renames it, so a killed run leaves nothing behind.
+void run_pgd_helper(const std::filesystem::path &in, const std::filesystem::path &out, const std::string &key_hex) {
+#if defined(__ANDROID__) || defined(__linux__)
+    const char *helper = std::getenv("PSPRECOMP_PGD_HELPER");
+    if (helper == nullptr || *helper == '\0') return;
+    std::error_code error;
+    std::filesystem::create_directories(out.parent_path(), error);
+    std::cerr << "[io-pgd] decrypting " << in.filename().string() << " (first use)\n";
+    const std::string in_s = in.string(), out_s = out.string();
+    const pid_t pid = fork();
+    if (pid == 0) {
+        execl(helper, helper, "pgd", in_s.c_str(), out_s.c_str(), key_hex.c_str(), static_cast<char *>(nullptr));
+        _exit(127);
+    }
+    int status = 0;
+    if (pid > 0) waitpid(pid, &status, 0);
+    std::cerr << "[io-pgd] " << in.filename().string() << ": helper exit "
+              << (pid > 0 && WIFEXITED(status) ? WEXITSTATUS(status) : -1) << "\n";
+#else
+    (void)in; (void)out; (void)key_hex;
+#endif
+}
 constexpr std::uint32_t kIoErrorInvalidArgument = 0x80010016u;
 constexpr std::uint32_t kIoErrorBadDescriptor = 0x80010009u;
 constexpr std::uint32_t kIoErrorNotFound = 0x80010002u;
@@ -575,14 +603,20 @@ void DiscIo::ioctl(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx)
     }
     const std::filesystem::path plain = decrypted_dir_ / file.native.filename();
     std::error_code error;
-    if (decrypted_dir_.empty() || !std::filesystem::is_regular_file(plain, error)) {
-        std::string key_hex;
+    std::string key_hex;
+    {
         static const char *digits = "0123456789abcdef";
         for (std::uint32_t i = 0; i < 16u && runtime.memory().contains(ctx.gpr[6u] + i, 1u); ++i) {
             const auto byte = runtime.memory().load8(ctx.gpr[6u] + i);
             key_hex += digits[byte >> 4u];
             key_hex += digits[byte & 15u];
         }
+    }
+    // First-run setup on Android (2026-11-18): the app's GPL helper decrypts the file with the key the game just
+    // gave, once, into the decrypted folder (PSPRECOMP_PGD_HELPER = its path; a separate process, never linked).
+    if (!decrypted_dir_.empty() && !std::filesystem::is_regular_file(plain, error) && key_hex.size() == 32u)
+        run_pgd_helper(file.native, plain, key_hex);
+    if (decrypted_dir_.empty() || !std::filesystem::is_regular_file(plain, error)) {
         runtime.stop("PGD file " + file.native.filename().string() + " needs an offline-decrypted copy at " +
                      plain.string() + ". Run: pgddec \"" + file.native.string() + "\" \"" + plain.string() +
                      "\" " + key_hex);

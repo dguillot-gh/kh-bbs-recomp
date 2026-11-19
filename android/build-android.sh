@@ -54,6 +54,10 @@ if [ "$WHAT" != apk ]; then
   else lowprio "$NINJA" -C "$BUILD" -j "$JOBS" bbs; fi
   mkdir -p "$LIB_OUT"
   "$NDK/toolchains/llvm/prebuilt/$HOSTTAG/bin/llvm-strip$X" --strip-unneeded -o "$LIB_OUT/libbbs.so" "$BUILD/libbbs.so"
+  # First-run EBOOT decrypter (GPL-3.0 helper, android/decrypt/README.md); optional.
+  if [ "$X" = .exe ]; then lowprio "$(cygpath -w "$NINJA")" -C "$(cygpath -w "$BUILD")" -j "$JOBS" bbsdecrypt
+  else lowprio "$NINJA" -C "$BUILD" -j "$JOBS" bbsdecrypt; fi || echo "bbsdecrypt not built"
+  [ -f "$BUILD/libbbsdecrypt.so" ] && "$NDK/toolchains/llvm/prebuilt/$HOSTTAG/bin/llvm-strip$X" --strip-unneeded     -o "$LIB_OUT/libbbsdecrypt.so" "$BUILD/libbbsdecrypt.so"
   ls -la "$LIB_OUT/libbbs.so"
 fi
 if [ "$WHAT" != lib ]; then
@@ -77,7 +81,10 @@ if [ "$WHAT" != lib ]; then
     --lib "$(w "$JAR")" --output "$(w "$O/dex")" \
     $(find "$O/classes" -name '*.class' | while read f; do w "$f"; done)
   cp "$LIB_OUT/libbbs.so" "$O/lib/arm64-v8a/"
-  (cd "$O/dex" && "$JDK/bin/jar$X" uf ../base.apk classes.dex) && (cd "$O" && "$JDK/bin/jar$X" uf0 base.apk lib/arm64-v8a/libbbs.so)
+  LIBS=lib/arm64-v8a/libbbs.so
+  if [ -f "$LIB_OUT/libbbsdecrypt.so" ]; then cp "$LIB_OUT/libbbsdecrypt.so" "$O/lib/arm64-v8a/"; LIBS="$LIBS lib/arm64-v8a/libbbsdecrypt.so"
+  else echo "warning: no libbbsdecrypt.so: the app can't set itself up from an ISO"; fi
+  (cd "$O/dex" && "$JDK/bin/jar$X" uf ../base.apk classes.dex) && (cd "$O" && "$JDK/bin/jar$X" uf0 base.apk $LIBS)
   "$BT/zipalign$X" -f -p 16 "$(w "$O/base.apk")" "$(w "$O/aligned.apk")"
   "$JDK/bin/java$X" -jar "$(w "$BT/lib/apksigner.jar")" sign --ks "$(w "$KS")" \
     --ks-pass pass:android --key-pass pass:android --ks-key-alias androiddebugkey \

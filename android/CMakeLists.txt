@@ -100,3 +100,19 @@ set_target_properties(bbs_at3 PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(bbs PRIVATE "${BBS_AT3_DIR}")
 target_link_libraries(bbs PRIVATE vulkan android log aaudio mediandk bbs_at3)
 target_link_options(bbs PRIVATE -Wl,--gc-sections -Wl,-z,max-page-size=16384)
+# First-run setup (C2): EBOOT decrypter, its own executable (GPL-3.0: links third_party/pspdecrypt's PrxDecrypter +
+# libkirk). Packaged as lib/arm64-v8a/libbbsdecrypt.so so Android extracts it next to libbbs.so; the app runs it as a
+# separate process (LauncherActivity / IsoInstaller), it is never linked into libbbs. Source: android/decrypt/.
+set(BBS_PSPDECRYPT_DIR "${BBS_REPO}/third_party/pspdecrypt")
+if(EXISTS "${BBS_PSPDECRYPT_DIR}/PrxDecrypter.cpp")
+    enable_language(C)   # libkirk and kl4e are C
+    file(GLOB BBS_KIRK_SOURCES "${BBS_PSPDECRYPT_DIR}/libkirk/*.c")
+    add_executable(bbsdecrypt "${CMAKE_CURRENT_LIST_DIR}/decrypt/bbs_decrypt.cpp" "${BBS_PSPDECRYPT_DIR}/PrxDecrypter.cpp"
+        "${BBS_PSPDECRYPT_DIR}/kl4e.c" ${BBS_KIRK_SOURCES})
+    target_include_directories(bbsdecrypt PRIVATE "${BBS_PSPDECRYPT_DIR}")
+    target_compile_options(bbsdecrypt PRIVATE -O2 -w)
+    target_link_libraries(bbsdecrypt PRIVATE z)
+    set_target_properties(bbsdecrypt PROPERTIES OUTPUT_NAME "libbbsdecrypt.so" SUFFIX "")
+else()
+    message(WARNING "third_party/pspdecrypt missing (git submodule update --init): no first-run EBOOT decrypter")
+endif()

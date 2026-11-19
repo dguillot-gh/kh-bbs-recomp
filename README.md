@@ -18,6 +18,10 @@ are re-implemented by [psp-native-runtime](https://github.com/dguillot-gh/psp-na
     <td><img src="docs/screenshots/training-rings.jpg" alt="Training ground at night"></td>
     <td><img src="docs/screenshots/in-game-menu.jpg" alt="In-game menu"></td>
   </tr>
+  <tr>
+    <td><img src="docs/screenshots/launcher.jpg" alt="Launcher"></td>
+    <td><img src="docs/screenshots/opening-movie.jpg" alt="Opening movie"></td>
+  </tr>
 </table>
 
 <sub>Moto G Stylus 2025, 2x resolution, "Phone screen" aspect, original textures.</sub>
@@ -25,6 +29,12 @@ are re-implemented by [psp-native-runtime](https://github.com/dguillot-gh/psp-na
 ## What works
 
 - Boot to gameplay, with **sound** (music, voices, effects).
+- **Movies** (the story cutscenes): H.264 decoded by the phone's hardware decoder, with their ATRAC3plus audio.
+- **Launcher**: Continue (latest save state), Start, Load state, Settings, Game files. Its background is your own
+  disc's art.
+- **First-run setup on the phone**: pick your ISO and the app copies the game files and decrypts what it needs
+  on the device (a bundled GPL-3.0 helper, see [android/decrypt](android/decrypt/README.md)). No PC step, nothing
+  downloaded.
 - **60 FPS mode** (toggle in the menu; ~55-60 FPS on a Moto G Stylus 2025).
 - **Save states** (8 slots), plus the game's own saves.
 - **Touch controls** you can move, resize and hide, with an analog stick; **gamepads** (both sticks, D-pad, triggers).
@@ -35,7 +45,7 @@ are re-implemented by [psp-native-runtime](https://github.com/dguillot-gh/psp-na
 
 Shadows, glows and hit effects render.
 
-**Not yet:** movies are skipped; the Windows build is behind the Android one. See `NOTES.md` for the detailed log.
+**Not yet:** the Windows build is behind the Android one (no movies or ATRAC music there yet). See `NOTES.md` for the detailed log.
 
 ## Supported dump
 
@@ -61,7 +71,8 @@ bash scripts/6-INSTALL-PHONE.sh
 ```
 
 Everything made from your disc goes into `game/` and build output into `build/`; git ignores both.
-The install script doesn't copy everything the game needs yet (the ISO and the offline-decrypted `BBS1-3.DAT`).
+On first start the app asks for your ISO (put it in Downloads, then **Choose ISO…**): it copies the disc into its
+own storage (about 4 GB) and decrypts `EBOOT.BIN` and, on first use, `BBS1-3.DAT` on the phone.
 
 ## HD textures (optional)
 
