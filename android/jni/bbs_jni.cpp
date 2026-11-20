@@ -175,6 +175,11 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeS
     const std::string dir = str(files_dir);
     // vcs::initialize_vcs_configuration reads VCSNative.ini beside argv[0]; the Java side writes it to files/.
     setenv("PSPRECOMP_CONFIG", (dir + "/VCSNative.ini").c_str(), 0);
+    // Mailbox presenting (2026-11-20): with FIFO the game's self-timed frames drifted against the 60 Hz display, the
+    // queue filled and a frame waited 2-3 refreshes (~50 ms) every few seconds, stalling game and sound ("a skipping
+    // CD"). Mailbox replaces the waiting frame instead; BBS still paces itself to 60. env.txt
+    // PSPRECOMP_VULKAN_VSYNC=1 brings FIFO back.
+    setenv("PSPRECOMP_VULKAN_VSYNC", "0", 0);
     // Graphics capture always armed: idle until `adb shell setprop debug.bbs.capture 1`, then it writes draws and
     // textures to Download/bbs-cap (readable by adb). env.txt may override.
     setenv("PSPRECOMP_GE_CAPTURE", "/storage/emulated/0/Download/bbs-cap", 0);
