@@ -30,6 +30,7 @@ extern std::atomic<std::uint64_t> g_bbs_flip_count;
 extern std::atomic<bool> g_bbs_60fps;
 extern std::atomic<std::uint32_t> g_bbs_boss_checkpoints;
 extern std::atomic<int> g_bbs_character;
+extern std::atomic<std::uint32_t> g_bbs_player_hits;
 
 namespace {
 std::atomic<bool> g_started{false};
@@ -147,6 +148,11 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeFlip
 // Boss checkpoints written so far (host/main.cpp): the app shows a notice when it goes up.
 extern "C" JNIEXPORT jint JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeBossCheckpoints(JNIEnv *, jclass) {
     return static_cast<jint>(g_bbs_boss_checkpoints.load(std::memory_order_relaxed));
+}
+
+// Times the player's HP went down (host/main.cpp): a hit ends a latched Shotlock button.
+extern "C" JNIEXPORT jint JNICALL Java_com_psprecomp_bbs_BbsActivity_nativePlayerHits(JNIEnv *, jclass) {
+    return static_cast<jint>(g_bbs_player_hits.load(std::memory_order_relaxed));
 }
 
 // Story slots: who is playing (host/main.cpp): 0 = not known, 1 Ventus, 2 Aqua, 3 Terra.

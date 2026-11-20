@@ -68,6 +68,7 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
     static native long nativeFlipCount();
     static native int nativeBossCheckpoints();
     static native int nativeCharacter();
+    static native int nativePlayerHits();
     static native boolean nativeSetTextureReplacement(boolean on);
     static native void nativeSet60Fps(boolean on);
 
@@ -127,6 +128,8 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
             @Override public void onEditDone() { menuOpen = false; updatePause(); hideSystemBars(); }
         });
         root.addView(pad);
+        // A hit cancels Shotlock in the game; release a latched Shotlock button then, or the held L+R starts it again.
+        pad.setShotlockWatcher(() -> started ? nativePlayerHits() : 0);
         setContentView(root);
         hideSystemBars();
         handler.post(fpsTick);

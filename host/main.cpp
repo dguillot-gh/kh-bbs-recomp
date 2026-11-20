@@ -101,6 +101,55 @@ extern "C" void bbs_script_command(const char *name) noexcept {
 // other discs). g_bbs_player_root is per disc (0 = off).
 std::uint32_t g_bbs_player_root = 0u;
 std::atomic<int> g_bbs_character{0};
+// Player hits (2026-11-20): counts drops of the player's HP, so the app can release a latched Shotlock button when a
+// hit cancels the aim (holding L+R would start it again). Player.GetHP (FM handler 0x089E7C88) calls the player's
+// virtual getter at vtable+128 ({int16 this-delta, function}); bbs_eval_getter() steps through that small leaf
+// function (loads and adds up to `jr ra`) to read the value without running guest code.
+std::atomic<std::uint32_t> g_bbs_player_hits{0u};
+// Player state (2026-11-20): GetPlayerState (FM handler 0x089E924C) returns the word at actor+544 (scripts compare
+// it with PLAYER_STATE_GUARD, _ILLUSION, ...; the values are not named in the EBOOT). Kept for later features;
+// PSPRECOMP_STATE_TRACE=1 logs each change as [pstate]. -1 = no player.
+std::atomic<int> g_bbs_player_state{-1};
+namespace {
+bool bbs_eval_getter(const psprecomp::GuestMemory &mem, std::uint32_t fn, std::uint32_t self, std::int32_t &out,
+                     bool log) {
+    std::uint32_t r[32] = {};
+    r[4] = self;
+    const auto ram = [](std::uint32_t a) { return a >= 0x08800000u && a < 0x0A000000u; };
+    bool returning = false;
+    for (int i = 0; i < 10; ++i) {
+        const std::uint32_t pc = fn + static_cast<std::uint32_t>(i) * 4u;
+        if (!ram(pc)) return false;
+        const std::uint32_t w = mem.load32(pc);
+        if (log) std::cerr << "[hp] getter 0x" << std::hex << pc << ": " << w << std::dec << '\n';
+        const std::uint32_t op = w >> 26u, rs = (w >> 21u) & 31u, rt = (w >> 16u) & 31u, rd = (w >> 11u) & 31u;
+        const std::int32_t imm = static_cast<std::int16_t>(w & 0xFFFFu);
+        const std::uint32_t ea = r[rs] + static_cast<std::uint32_t>(imm);
+        if (w == 0u) {                                       // nop
+        } else if (op == 0u && (w & 63u) == 8u && rs == 31u) {   // jr ra: run the delay slot, then done
+            returning = true;
+            continue;
+        } else if (op == 0u && (w & 63u) == 0x21u) { r[rd] = r[rs] + r[rt];   // addu (move)
+        } else if (op == 0u && (w & 63u) == 0x25u) { r[rd] = r[rs] | r[rt];   // or (move)
+        } else if (op == 0x09u) { r[rt] = r[rs] + static_cast<std::uint32_t>(imm);   // addiu
+        } else if (op >= 0x20u && op <= 0x25u && op != 0x22u) {   // lb lh lw lbu lhu
+            if (!ram(ea)) return false;
+            switch (op) {
+                case 0x20u: r[rt] = static_cast<std::uint32_t>(static_cast<std::int8_t>(mem.load8(ea))); break;
+                case 0x21u: r[rt] = static_cast<std::uint32_t>(static_cast<std::int16_t>(mem.load16(ea))); break;
+                case 0x23u: r[rt] = mem.load32(ea); break;
+                case 0x24u: r[rt] = mem.load8(ea); break;
+                default: r[rt] = mem.load16(ea); break;
+            }
+        } else {
+            return false;   // anything else: not a plain getter
+        }
+        r[0] = 0u;
+        if (returning) { out = static_cast<std::int32_t>(r[2]); return true; }
+    }
+    return false;
+}
+} // namespace
 // 60 FPS mode (2026-11-18, experimental). BBS's vblank sub-interrupt handler 0x0880919C reads a frame-mode word
 // at 0x09F22E08 (getter 0x088072A4): 1 in gameplay = wake FlipThread only every second vblank (30 FPS), 0 = every
 // vblank. Like the Final Mix CWCheat (_L 0x21725EC8 0 writes the same kind of word, at the FM address), keep it at
@@ -1298,6 +1347,32 @@ int main(int argc, char **argv) {
                 if (g_bbs_character.exchange(character) != character)
                     std::cerr << "[story] character " << character << " (root 0x" << std::hex << root << " player 0x"
                               << player << " raw " << std::dec << raw << ")" << '\n';
+                {
+                    const int state = character != 0 ? static_cast<int>(mem.load32(player + 544u)) : -1;
+                    if (g_bbs_player_state.exchange(state) != state && std::getenv("PSPRECOMP_STATE_TRACE") != nullptr)
+                        std::cerr << "[pstate] " << state << std::endl;
+                }
+                // Hits: HP going down while the same player object is in play.
+                static std::uint32_t hp_player = 0u, hp_fn = 0u;
+                static std::int32_t hp_last = -1;
+                std::int32_t hp = -1;
+                if (character != 0) {
+                    const std::uint32_t vt = mem.load32(player + 28u);
+                    if (ram(vt)) {
+                        const std::int32_t delta = static_cast<std::int16_t>(mem.load16(vt + 128u));
+                        const std::uint32_t fn = mem.load32(vt + 132u);
+                        const bool first = fn != hp_fn;
+                        if (!bbs_eval_getter(mem, fn, player + static_cast<std::uint32_t>(delta), hp, first)) hp = -1;
+                        if (first) std::cerr << "[hp] getter 0x" << std::hex << fn << std::dec << " -> " << hp << '\n';
+                        hp_fn = fn;
+                    }
+                }
+                if (hp >= 0 && player == hp_player && hp_last >= 0 && hp != hp_last) {
+                    if (hp < hp_last) g_bbs_player_hits.fetch_add(1u);
+                    std::cerr << "[hp] " << hp_last << " -> " << hp << " (hits " << g_bbs_player_hits.load() << ")" << std::endl;
+                }
+                hp_player = player;
+                hp_last = hp;
             }
             if (g_bbs_boss_request.exchange(0) != 0) {
                 static const char *boss_path = std::getenv("PSPRECOMP_BOSS_STATE");

@@ -72,6 +72,28 @@ final class TouchPad extends View {
     private boolean shotlockLatched, shotlockWasLatched;
     private int lastFace;
 
+    /** Hit counter from the game (BbsActivity: nativePlayerHits, counts HP drops); a change while latched releases
+     *  the latch, as a hit cancels the aim in the game (confirmed in play 2026-11-20, released ~40 ms after the hit). */
+    interface HitCounter { int hits(); }
+    private HitCounter hitCounter;
+    private int latchHits;
+    private final Runnable latchWatch = new Runnable() {
+        @Override public void run() {
+            if (!shotlockLatched || hitCounter == null) return;
+            if (hitCounter.hits() != latchHits && shotlockPointer < 0) {
+                android.util.Log.i("BBS", "shotlock latch released by a hit");
+                shotlockLatched = false;
+                listener.onButtons(currentButtons & ~(BbsActivity.PSP_L | BbsActivity.PSP_R));
+                invalidate();
+                return;
+            }
+            postDelayed(this, 50);
+        }
+    };
+    private int currentButtons;
+
+    void setShotlockWatcher(HitCounter c) { hitCounter = c; }
+
     /** Drops a latched Shotlock (the in-game menu opens). */
     void releaseShotlock() {
         if (!shotlockLatched) return;
@@ -376,6 +398,12 @@ final class TouchPad extends View {
                     shotlockPointer = -1;
                     // Lifting always ends a latch that was on at touch-down; a short tap from off latches it.
                     shotlockLatched = !shotlockWasLatched && e.getEventTime() - shotlockDownTime < SHOTLOCK_TAP_MS;
+                    if (shotlockLatched && hitCounter != null) {
+                        latchHits = hitCounter.hits();
+                        android.util.Log.i("BBS", "shotlock latched (hits " + latchHits + ")");
+                        removeCallbacks(latchWatch);
+                        postDelayed(latchWatch, 50);
+                    }
                 } else {
                     b |= BbsActivity.PSP_L | BbsActivity.PSP_R;
                 }
@@ -410,6 +438,7 @@ final class TouchPad extends View {
         if (shotlockLatched && lastFace != 0 && face == 0 && shotlockPointer < 0) shotlockLatched = false;
         lastFace = face;
         if (shotlockLatched) b |= BbsActivity.PSP_L | BbsActivity.PSP_R;
+        currentButtons = b;
         listener.onButtons(b);
         invalidate();
         return true;
