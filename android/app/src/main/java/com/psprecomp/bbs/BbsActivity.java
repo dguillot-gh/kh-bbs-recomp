@@ -48,6 +48,13 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
     private SharedPreferences settings;
     private float deadzone;
     private boolean invertCamX, invertCamY;
+    /** Swap ○ and ✕ (2026-11-20): Final Mix is a Japanese release (○ confirms, ✕ cancels); swapped, the buttons work
+     *  like the USA release. On by default for Final Mix, off for the USA disc; the player can change it. */
+    private boolean swapOX;
+
+    static boolean swapOXDefault(android.content.Context c) {
+        return "ULJM-05775".equals(IsoInstaller.gameIdFor(c));
+    }
 
     static { System.loadLibrary("bbs"); }
 
@@ -107,6 +114,7 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
         deadzone = settings.getFloat("deadzone", 0.15f);
         invertCamX = settings.getBoolean("invert_cam_x", false);
         invertCamY = settings.getBoolean("invert_cam_y", false);
+        swapOX = settings.getBoolean("swap_ox", swapOXDefault(this));
         SurfaceView view = new SurfaceView(this);
         view.getHolder().addCallback(this);
         android.widget.FrameLayout root = new android.widget.FrameLayout(this);
@@ -278,6 +286,7 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
                 (fps60 ? "✓ " : "   ") + "60 FPS mode",
                 "Resolution… (" + settings.getInt("render_scale", 1) + "x)",
                 "Aspect ratio… (" + (settings.getBoolean("widescreen", false) ? "Phone screen" : "16:9") + ")",
+                (swapOX ? "✓ " : "   ") + "Swap ○ / ✕ (USA layout: ✕ confirms)",
                 "Quit to launcher",
         };
         AlertDialog d = dialog().setTitle("Birth by Sleep").setItems(items, (x, picked) -> {
@@ -306,6 +315,11 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
                 case 12: openResolution(); break;
                 case 13: openAspect(); break;
                 case 14:
+                    swapOX = !swapOX;
+                    settings.edit().putBoolean("swap_ox", swapOX).apply();
+                    pushButtons();
+                    break;
+                case 15:
                     showDialog(dialog().setTitle("Quit to the launcher?")
                             .setMessage(StorySlots.valid(character)
                                     ? StorySlots.NAMES[character] + "'s story slot is saved first."
@@ -731,7 +745,12 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void pushButtons() {
-        nativeSetButtons(touchButtons | keyButtons | hatButtons | triggerButtons);
+        int b = touchButtons | keyButtons | hatButtons | triggerButtons;
+        if (swapOX) {
+            int circle = b & PSP_CIRCLE, cross = b & PSP_CROSS;
+            b = (b & ~(PSP_CIRCLE | PSP_CROSS)) | (circle != 0 ? PSP_CROSS : 0) | (cross != 0 ? PSP_CIRCLE : 0);
+        }
+        nativeSetButtons(b);
     }
 
     private static int toByte(float v) {

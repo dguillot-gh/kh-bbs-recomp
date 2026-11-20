@@ -43,6 +43,7 @@ are re-implemented by [psp-native-runtime](https://github.com/dguillot-gh/psp-na
 - **Story slots**: one automatic save state per character (Ventus, Aqua, Terra), kept current when you leave the
   app, quit, or save. **Switch story…** in the menu and **▶ Ventus / Aqua / Terra** in the launcher jump between
   the three stories without the title screen. A character's slot appears the first time you play them.
+- **Swap ○ / ✕** (menu and launcher settings): on by default for Final Mix, so ✕ confirms like the USA release.
 - **Touch controls** you can move, resize and hide, with an analog stick; **gamepads** (both sticks, D-pad, triggers).
 - **Right-stick camera** (a dual-analog camera, like the RemasteredControls mod).
 - **Resolution** 1x-4x and **aspect ratio**: 16:9 or the full phone screen (wider view, not stretched).

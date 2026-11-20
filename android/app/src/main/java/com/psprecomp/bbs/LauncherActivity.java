@@ -109,6 +109,8 @@ public class LauncherActivity extends Activity {
     // ---- screen ----
 
     /** This build is for Final Mix (ULJM-05775), not the US disc. */
+    private boolean swapOX() { return settings.getBoolean("swap_ox", BbsActivity.swapOXDefault(this)); }
+
     private boolean finalMix() { return "ULJM-05775".equals(IsoInstaller.gameIdFor(this)); }
 
     private void build() {
@@ -369,6 +371,7 @@ public class LauncherActivity extends Activity {
                 (hd ? "✓ " : "   ") + "HD textures" + (hdInstalled ? "" : " (no pack installed: import one from the in-game menu)"),
                 (settings.getBoolean("invert_cam_x", false) ? "✓ " : "   ") + "Invert camera left/right",
                 (settings.getBoolean("invert_cam_y", false) ? "✓ " : "   ") + "Invert camera up/down",
+                (swapOX() ? "✓ " : "   ") + "Swap ○ / ✕ (USA layout: ✕ confirms)",
         };
         dialog().setTitle("Settings").setItems(items, (d, w) -> {
             switch (w) {
@@ -394,6 +397,7 @@ public class LauncherActivity extends Activity {
                 case 3: settings.edit().putBoolean("texture_pack", !hd).apply(); break;
                 case 4: settings.edit().putBoolean("invert_cam_x", !settings.getBoolean("invert_cam_x", false)).apply(); break;
                 case 5: settings.edit().putBoolean("invert_cam_y", !settings.getBoolean("invert_cam_y", false)).apply(); break;
+                case 6: settings.edit().putBoolean("swap_ox", !swapOX()).apply(); break;
                 default: return;
             }
             build();
