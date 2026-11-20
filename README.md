@@ -34,7 +34,7 @@ are re-implemented by [psp-native-runtime](https://github.com/dguillot-gh/psp-na
 - **First-run setup on the phone**: pick your ISO and the app copies the game files and decrypts what it needs
   on the device (a bundled GPL-3.0 helper, see [android/decrypt](android/decrypt/README.md)). No PC step, nothing
   downloaded.
-- **60 FPS mode** (toggle in the menu; ~55-60 FPS on a Moto G Stylus 2025).
+- **60 FPS mode** (toggle in the menu; a steady 60 FPS on a Moto G Stylus 2025 with the default -O2 build).
 - **Save states** (8 slots), plus the game's own saves.
 - **Boss checkpoint**: when a boss fight starts, a save state is taken automatically; **Restart boss fight** in the
   menu goes straight back to the start of the fight (found from the game's own `SetBossCamera` script command).

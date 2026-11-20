@@ -31,7 +31,11 @@ set(HS "${RT}/host-shared")
 # Generated from your own disc by scripts/1-3 (never committed).
 set(BBS_GENERATED_DIR "${BBS_REPO}/game/generated" CACHE PATH "BBS generated code (scripts/3-GENERATE.sh)")
 set(BBS_OVERLAY_DIR "${BBS_REPO}/game/overlays" CACHE PATH "BBS recompiled MODULE/*.ELF overlays (scripts/gen-overlays.sh)")
-set(BBS_GENERATED_OPT "-O1" CACHE STRING "Optimization flag for the generated units")
+set(BBS_GENERATED_OPT "-O2" CACHE STRING "Optimization flag for the generated units")
+# CPU baseline for everything in libbbs (2026-11-20). Empty = the NDK default (ARMv8.0: atomics go through
+# __aarch64_* helper calls). ARMv8.2-A (every phone CPU since ~2018: Cortex-A55/A75 and later) inlines LSE atomics
+# and allows fp16/dot-product code.
+set(BBS_ARCH_FLAGS "" CACHE STRING "Extra -march/-mcpu flags for libbbs, e.g. -march=armv8.2-a+fp16+dotprod")
 set(PSP_PYTHON "python" CACHE FILEPATH "Python 3 for embed_spirv.py")
 set(PSP_GLSLC "" CACHE FILEPATH "glslc (NDK shader-tools)")
 
@@ -82,6 +86,10 @@ target_compile_definitions(bbs PRIVATE VCS_VULKAN_GE_BACKEND)
 target_include_directories(bbs PRIVATE "${RT}/include" "${VCS}" "${HS}" "${BBS_REPO}/host"
     "${BBS_GENERATED_DIR}" "${SPV_DIR}")
 target_compile_options(bbs PRIVATE -w -fexceptions -frtti)
+if(BBS_ARCH_FLAGS)
+    separate_arguments(BBS_ARCH_LIST UNIX_COMMAND "${BBS_ARCH_FLAGS}")
+    target_compile_options(bbs PRIVATE ${BBS_ARCH_LIST})
+endif()
 # BBS's main() becomes bbs_main(), called from the JNI game thread.
 set_source_files_properties(${BBS_REPO}/host/main.cpp PROPERTIES COMPILE_DEFINITIONS "main=bbs_main")
 set_source_files_properties(${HOST_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2")

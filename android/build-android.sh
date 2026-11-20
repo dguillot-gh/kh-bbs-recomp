@@ -13,7 +13,10 @@
 #   LAUNCHER_BG                         optional JPG/PNG for the launcher background (default: the disc's PIC1.PNG)
 #   GAME_ID                             disc the generated code is for (ULUS-10505; Final Mix: ULJM-05775)
 #   BUILD_DIR JOBS OPT                  build folder (default <repo>/build/android), parallel jobs (4), -O for the
-#                                       generated units (-O1)
+#                                       generated units (-O2; -O1 builds faster but ran ~57 FPS instead of 60 on a
+#                                       Moto G Stylus 2025, 2026-11-20)
+#   ARCH_FLAGS                          CPU flags for libbbs (default -march=armv8.2-a+fp16+dotprod: every phone CPU
+#                                       since ~2018; set ARCH_FLAGS= for the ARMv8.0 baseline)
 # Without Gradle: the SDK's aapt2 + javac + d8 + zipalign + apksigner. Signed with ~/.android/debug.keystore
 # (created if missing), so the APK is for your own phone only.
 set -eu
@@ -53,7 +56,7 @@ if [ "$WHAT" != apk ]; then
     -DCMAKE_MAKE_PROGRAM="$(w "$NINJA")" \
     -DCMAKE_TOOLCHAIN_FILE="$(w "$NDK")/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DANDROID_STL=c++_static \
-    -DCMAKE_BUILD_TYPE=Release -DBBS_GENERATED_OPT="${OPT:--O1}" -DBBS_GENERATED_DIR="$(w "$CORPUS")" -DBBS_OVERLAY_DIR="$(w "$OVERLAYS")" \
+    -DCMAKE_BUILD_TYPE=Release -DBBS_GENERATED_OPT="${OPT:--O2}" -DBBS_ARCH_FLAGS="${ARCH_FLAGS--march=armv8.2-a+fp16+dotprod}" -DBBS_GENERATED_DIR="$(w "$CORPUS")" -DBBS_OVERLAY_DIR="$(w "$OVERLAYS")" \
     -DPSP_PYTHON="$(w "$PY")" -DPSP_GLSLC="$(w "$NDK")/shader-tools/$HOSTTAG/glslc$X"
   if [ "$X" = .exe ]; then lowprio "$(cygpath -w "$NINJA")" -C "$(cygpath -w "$BUILD")" -j "$JOBS" bbs
   else lowprio "$NINJA" -C "$BUILD" -j "$JOBS" bbs; fi
