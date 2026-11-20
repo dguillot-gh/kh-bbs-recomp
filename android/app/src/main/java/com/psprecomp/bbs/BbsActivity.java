@@ -265,6 +265,7 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
         if (pad.isEditing()) return;
         menuOpen = true;
         updatePause();
+        pad.releaseShotlock();
         touchButtons = 0; keyButtons = 0; pushButtons();
         String[] items = {
                 "Resume",

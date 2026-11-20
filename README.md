@@ -44,7 +44,7 @@ are re-implemented by [psp-native-runtime](https://github.com/dguillot-gh/psp-na
   app, quit, or save. **Switch story…** in the menu and **▶ Ventus / Aqua / Terra** in the launcher jump between
   the three stories without the title screen. A character's slot appears the first time you play them.
 - **Swap ○ / ✕** (menu and launcher settings): on by default for Final Mix, so ✕ confirms like the USA release.
-- **Touch controls** you can move, resize and hide, with an analog stick and a **Shotlock** button (holds L+R); **gamepads** (both sticks, D-pad, triggers).
+- **Touch controls** you can move, resize and hide, with an analog stick and a **Shotlock** button (tap to lock L+R on, gold while on; or hold it); **gamepads** (both sticks, D-pad, triggers).
 - **Right-stick camera** (a dual-analog camera, like the RemasteredControls mod).
 - **Resolution** 1x-4x and **aspect ratio**: 16:9 or the full phone screen (wider view, not stretched).
 - **HD texture packs** in PPSSPP format, such as BBS HD ReMix: import the ZIP from the in-game menu

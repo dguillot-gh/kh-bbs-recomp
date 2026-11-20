@@ -50,7 +50,7 @@ final class TouchPad extends View {
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG), text = new Paint(Paint.ANTI_ALIAS_FLAG),
             knob = new Paint(Paint.ANTI_ALIAS_FLAG), outline = new Paint(Paint.ANTI_ALIAS_FLAG),
             fpsText = new Paint(Paint.ANTI_ALIAS_FLAG), fpsBack = new Paint(Paint.ANTI_ALIAS_FLAG),
-            toolFill = new Paint(Paint.ANTI_ALIAS_FLAG);
+            toolFill = new Paint(Paint.ANTI_ALIAS_FLAG), latchFill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private float u; // unit = screen height / 10
 
     private int stickPointer = -1;
@@ -61,6 +61,23 @@ final class TouchPad extends View {
     private float camKnobDx, camKnobDy;
 
     private String fpsLabel = "FPS --";
+
+    // Shotlock button: a short tap latches L+R on (tap again, fire, or open the menu to release); held longer it
+    // works as hold-to-aim and releases when lifted.
+    private static final long SHOTLOCK_TAP_MS = 300;
+    private static final int FACE_BITS = BbsActivity.PSP_CROSS | BbsActivity.PSP_CIRCLE | BbsActivity.PSP_SQUARE
+            | BbsActivity.PSP_TRIANGLE;
+    private int shotlockPointer = -1;
+    private long shotlockDownTime;
+    private boolean shotlockLatched, shotlockWasLatched;
+    private int lastFace;
+
+    /** Drops a latched Shotlock (the in-game menu opens). */
+    void releaseShotlock() {
+        if (!shotlockLatched) return;
+        shotlockLatched = false;
+        invalidate();
+    }
 
     // Edit mode.
     private boolean editing;
@@ -164,6 +181,7 @@ final class TouchPad extends View {
     private void applyOpacity() {
         fill.setColor(alpha(0x40, 0xFFFFFF));
         knob.setColor(alpha(0x70, 0xFFFFFF));
+        latchFill.setColor(alpha(0xA0, 0xFFC040));
         text.setColor(alpha(0x90, 0xFFFFFF));
         fpsBack.setColor(alpha(0x70, 0x000000));
     }
@@ -335,7 +353,11 @@ final class TouchPad extends View {
                 listener.onMenu();
                 return true;
             }
-            if (stickPointer < 0 && inStickZone(x, y)) {
+            if (shotlockPointer < 0 && visible[SHOTLOCK] && inRect(SHOTLOCK, x, y, 1.3f, 0.6f)) {
+                shotlockPointer = e.getPointerId(ai);
+                shotlockDownTime = e.getEventTime();
+                shotlockWasLatched = shotlockLatched;
+            } else if (stickPointer < 0 && inStickZone(x, y)) {
                 stickPointer = e.getPointerId(ai);
             } else if (camStickPointer < 0 && inCamStickZone(x, y)) {
                 camStickPointer = e.getPointerId(ai);
@@ -349,6 +371,16 @@ final class TouchPad extends View {
         for (int i = 0; i < e.getPointerCount(); i++) {
             boolean lifting = (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) && i == ai;
             int id = e.getPointerId(i);
+            if (id == shotlockPointer) {
+                if (lifting) {
+                    shotlockPointer = -1;
+                    // Lifting always ends a latch that was on at touch-down; a short tap from off latches it.
+                    shotlockLatched = !shotlockWasLatched && e.getEventTime() - shotlockDownTime < SHOTLOCK_TAP_MS;
+                } else {
+                    b |= BbsActivity.PSP_L | BbsActivity.PSP_R;
+                }
+                continue;
+            }
             if (id == camPointer) {
                 if (lifting) { camPointer = -1; listener.onCamera(0, 0); }
                 else {
@@ -373,6 +405,11 @@ final class TouchPad extends View {
         }
         if (!stickSeen && stickPointer >= 0) releaseStick();
         if (!camStickSeen && camStickPointer >= 0) releaseCamStick();
+        // Latched Shotlock: firing (a face button pressed, then released) ends it, as the shot ends the aim.
+        int face = b & FACE_BITS;
+        if (shotlockLatched && lastFace != 0 && face == 0 && shotlockPointer < 0) shotlockLatched = false;
+        lastFace = face;
+        if (shotlockLatched) b |= BbsActivity.PSP_L | BbsActivity.PSP_R;
         listener.onButtons(b);
         invalidate();
         return true;
@@ -473,7 +510,8 @@ final class TouchPad extends View {
                 c.drawText(id == L ? "L" : "R", x, y + 0.18f * s, text);
                 break;
             case SHOTLOCK:
-                c.drawRoundRect(x - 1.3f * s, y - 0.5f * s, x + 1.3f * s, y + 0.5f * s, 0.5f * s, 0.5f * s, fill);
+                c.drawRoundRect(x - 1.3f * s, y - 0.5f * s, x + 1.3f * s, y + 0.5f * s, 0.5f * s, 0.5f * s,
+                        shotlockLatched ? latchFill : fill);   // gold while latched
                 text.setTextSize(0.36f * s);
                 c.drawText("SHOTLOCK", x, y + 0.13f * s, text);
                 break;
