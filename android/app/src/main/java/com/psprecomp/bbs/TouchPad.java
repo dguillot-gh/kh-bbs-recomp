@@ -28,15 +28,18 @@ final class TouchPad extends View {
     }
 
     // Control ids. FPS and MENU are not PSP buttons.
-    static final int DPAD = 0, FACE = 1, STICK = 2, L = 3, R = 4, START = 5, SELECT = 6, FPS = 7, MENU = 8, CAMSTICK = 9, COUNT = 10;
-    private static final String[] KEYS = {"dpad", "face", "stick", "l", "r", "start", "select", "fps", "menu", "camstick"};
+    // SHOTLOCK (2026-11-20): one button that holds L+R, BBS's Shotlock aim, so the other thumb is free to fire.
+    static final int DPAD = 0, FACE = 1, STICK = 2, L = 3, R = 4, START = 5, SELECT = 6, FPS = 7, MENU = 8, CAMSTICK = 9,
+            SHOTLOCK = 10, COUNT = 11;
+    private static final String[] KEYS = {"dpad", "face", "stick", "l", "r", "start", "select", "fps", "menu", "camstick",
+            "shotlock"};
     static final String[] NAMES = {"D-pad", "Face buttons", "Analog stick", "L", "R", "START", "SELECT",
-            "FPS counter", "Menu button", "Camera stick"};
+            "FPS counter", "Menu button", "Camera stick", "Shotlock (L+R)"};
     // Default centres as fractions of width/height (landscape) and default scale.
     private static final float[][] DEFAULTS = {
             {0.105f, 0.33f, 1f}, {0.895f, 0.70f, 1f}, {0.135f, 0.73f, 1f}, {0.075f, 0.07f, 1f},
             {0.925f, 0.07f, 1f}, {0.565f, 0.93f, 1f}, {0.435f, 0.93f, 1f}, {0.30f, 0.06f, 1f},
-            {0.50f, 0.06f, 1f}, {0.68f, 0.72f, 0.8f}};
+            {0.50f, 0.06f, 1f}, {0.68f, 0.72f, 0.8f}, {0.895f, 0.40f, 1f}};
 
     private final float[] cx = new float[COUNT], cy = new float[COUNT], scale = new float[COUNT];
     private final boolean[] visible = new boolean[COUNT];
@@ -210,7 +213,7 @@ final class TouchPad extends View {
             case DPAD: return 1.7f * s;
             case FACE: return 2.3f * s;
             case STICK: case CAMSTICK: return 2.3f * s;
-            case L: case R: return 1.3f * s;
+            case L: case R: case SHOTLOCK: return 1.3f * s;
             case START: case SELECT: return 1.0f * s;
             case FPS: return 1.4f * s;
             default: return 0.6f * s;
@@ -259,6 +262,7 @@ final class TouchPad extends View {
     private int hit(float x, float y) {
         if (visible[L] && inRect(L, x, y, 1.3f, 0.6f)) return BbsActivity.PSP_L;
         if (visible[R] && inRect(R, x, y, 1.3f, 0.6f)) return BbsActivity.PSP_R;
+        if (visible[SHOTLOCK] && inRect(SHOTLOCK, x, y, 1.3f, 0.6f)) return BbsActivity.PSP_L | BbsActivity.PSP_R;
         if (visible[START] && inRect(START, x, y, 1.1f, 0.5f)) return BbsActivity.PSP_START;
         if (visible[SELECT] && inRect(SELECT, x, y, 1.1f, 0.5f)) return BbsActivity.PSP_SELECT;
         if (visible[DPAD]) {
@@ -467,6 +471,11 @@ final class TouchPad extends View {
                 c.drawRoundRect(x - 1.3f * s, y - 0.5f * s, x + 1.3f * s, y + 0.5f * s, 0.4f * s, 0.4f * s, fill);
                 text.setTextSize(0.5f * s);
                 c.drawText(id == L ? "L" : "R", x, y + 0.18f * s, text);
+                break;
+            case SHOTLOCK:
+                c.drawRoundRect(x - 1.3f * s, y - 0.5f * s, x + 1.3f * s, y + 0.5f * s, 0.5f * s, 0.5f * s, fill);
+                text.setTextSize(0.36f * s);
+                c.drawText("SHOTLOCK", x, y + 0.13f * s, text);
                 break;
             case START: case SELECT:
                 c.drawRoundRect(x - 1.0f * s, y - 0.4f * s, x + 1.0f * s, y + 0.4f * s, 0.4f * s, 0.4f * s, fill);
