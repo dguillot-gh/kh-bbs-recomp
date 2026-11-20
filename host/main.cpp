@@ -724,9 +724,18 @@ int main(int argc, char **argv) {
                 psphost::ge_display_present_gpu_frame(rt, buffer, stride, format, psphost::vblank_count());
                 g_bbs_flip_count.fetch_add(1u, std::memory_order_relaxed);
                 psphost::perf::frame_tick();   // [perf] frame breakdown every 2 s (PSPRECOMP_PERF=1)
-                if (g_bbs_60fps.load(std::memory_order_relaxed) && g_bbs_frame_mode_address != 0u
-                    && rt.memory().load32(g_bbs_frame_mode_address) == 1u)
-                    rt.memory().store32(g_bbs_frame_mode_address, 0u);
+                if (g_bbs_frame_mode_address != 0u) {
+                    // Turning the option off puts back the 1 we replaced: the game itself only writes the word on
+                    // scene changes, so without this the game stayed at 60 until the next area (2026-11-20).
+                    static bool we_cleared = false;
+                    const std::uint32_t mode = rt.memory().load32(g_bbs_frame_mode_address);
+                    if (g_bbs_60fps.load(std::memory_order_relaxed)) {
+                        if (mode == 1u) { rt.memory().store32(g_bbs_frame_mode_address, 0u); we_cleared = true; }
+                    } else if (we_cleared) {
+                        if (mode == 0u) rt.memory().store32(g_bbs_frame_mode_address, 1u);
+                        we_cleared = false;
+                    }
+                }
                 // Seal audio up to now even on frames nothing was submitted (silence, not underrun).
                 vcs::audio_output_advance(psphost::virtual_time_us());
                 ctx.set_gpr(2u, 0u);
