@@ -71,6 +71,36 @@ std::mutex g_bbs_state_mutex;
 std::string g_bbs_state_path;              // guarded by g_bbs_state_mutex
 std::atomic<bool> g_bbs_paused{false};
 std::atomic<std::uint64_t> g_bbs_flip_count{0u};  // sceDisplaySetFrameBuf calls (FPS counter in the app)
+// Boss checkpoint (2026-11-19): every standard boss script calls Player.SetBossCamera("<boss id>") once when the boss
+// is created (khlua: Final Mix's decompiled scripts). The hook (scripts/patch-script-hooks.py) asks for a save
+// state into $PSPRECOMP_BOSS_STATE at the next safe point; the app's "Restart boss fight" loads it. Its own request
+// flag and counter, so it never touches the manual save/load result. 60 s cooldown: multi-part bosses re-create.
+std::atomic<int> g_bbs_boss_request{0};
+std::atomic<std::uint32_t> g_bbs_boss_checkpoints{0u};   // checkpoints written (the app shows a notice on change)
+extern "C" void bbs_script_command(const char *name) noexcept {
+    static const bool trace = std::getenv("PSPRECOMP_SCRIPT_TRACE") != nullptr;
+    static std::chrono::steady_clock::time_point last_boss{};
+    static std::string last_name;
+    const auto now = std::chrono::steady_clock::now();
+    if (trace || last_name != name) std::cerr << "[script] " << name << "\n";
+    last_name = name;
+    if (std::strcmp(name, "SetBossCamera") == 0) {
+        if (last_boss.time_since_epoch().count() != 0 && now - last_boss < std::chrono::seconds(60)) {
+            std::cerr << "[boss] SetBossCamera again within 60 s: checkpoint kept\n";
+            return;
+        }
+        last_boss = now;
+        g_bbs_boss_request.store(1);
+        std::cerr << "[boss] fight start: checkpoint requested\n";
+    }
+}
+// Story slots (2026-11-20): which character is playing, for one automatic save state per story. Player.GetHandle
+// (FM handler 0x089E77C0) reads the player object from *(*(0x08B5A4B0) + 168); GetPlayerID's helper 0x08928D50
+// returns the halfword at actor+600 (with flag 1: (id - 1) % 3 + 1, so 1..3; 1 Ventus, 2 Aqua, 3 Terra: the
+// game's own PLAYER_ID_* constant table at 0x08B5B6A4, confirmed in play 11-20). Read at the safe point; 0 = not known (title, menus,
+// other discs). g_bbs_player_root is per disc (0 = off).
+std::uint32_t g_bbs_player_root = 0u;
+std::atomic<int> g_bbs_character{0};
 // 60 FPS mode (2026-11-18, experimental). BBS's vblank sub-interrupt handler 0x0880919C reads a frame-mode word
 // at 0x09F22E08 (getter 0x088072A4): 1 in gameplay = wake FlipThread only every second vblank (30 FPS), 0 = every
 // vblank. Like the Final Mix CWCheat (_L 0x21725EC8 0 writes the same kind of word, at the FM address), keep it at
@@ -181,6 +211,8 @@ int main(int argc, char **argv) {
             const std::string disc_id(id, static_cast<std::size_t>(umd.gcount()));
             g_bbs_frame_mode_address = disc_id == "ULUS-10505" ? 0x09F22E08u
                                      : disc_id == "ULJM-05775" ? 0x09F25EC8u : 0u;
+            // scripts/find-story-addresses.py derives these from each EBOOT
+            g_bbs_player_root = disc_id == "ULUS-10505" ? 0x08B74380u : disc_id == "ULJM-05775" ? 0x08B5A4B0u : 0u;
             std::cerr << "[bbs] disc " << (disc_id.empty() ? std::string("?") : disc_id) << "\n";
         }
         const std::uint64_t max_dispatches = argc == 4
@@ -1251,6 +1283,38 @@ int main(int argc, char **argv) {
                 g_bbs_state_result.store(ok ? 1 : -1);
             };
             handle_request();
+            if (g_bbs_player_root != 0u) {
+                // Story slots: who is playing (see g_bbs_character). Every pointer is checked against guest RAM.
+                const auto &mem = rt.memory();
+                const auto ram = [](std::uint32_t a) { return a >= 0x08800000u && a < 0x0A000000u; };
+                int character = 0;
+                std::uint32_t root = 0u, player = 0u, raw = 0u;
+                root = mem.load32(g_bbs_player_root);
+                if (ram(root)) player = mem.load32(root + 168u);
+                if (ram(player)) {
+                    raw = mem.load16(player + 600u);
+                    if (raw >= 1u && raw <= 9u) character = static_cast<int>((raw - 1u) % 3u + 1u);
+                }
+                if (g_bbs_character.exchange(character) != character)
+                    std::cerr << "[story] character " << character << " (root 0x" << std::hex << root << " player 0x"
+                              << player << " raw " << std::dec << raw << ")" << '\n';
+            }
+            if (g_bbs_boss_request.exchange(0) != 0) {
+                static const char *boss_path = std::getenv("PSPRECOMP_BOSS_STATE");
+                if (boss_path != nullptr && *boss_path != '\0') {
+                    const auto started = std::chrono::steady_clock::now();
+                    bool ok = false;
+                    try {
+                        ok = save_state_to(boss_path, rt, ctx);
+                    } catch (const std::exception &e) {
+                        std::cerr << "[boss] " << e.what() << "\n";
+                    }
+                    if (ok) g_bbs_boss_checkpoints.fetch_add(1u);
+                    std::cerr << "[boss] checkpoint " << (ok ? "saved" : "FAILED") << " ("
+                              << std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - started).count() << " ms)\n";
+                }
+            }
             while (g_bbs_paused.load(std::memory_order_relaxed)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 handle_request();

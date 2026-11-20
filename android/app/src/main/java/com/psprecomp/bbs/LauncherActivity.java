@@ -228,6 +228,18 @@ public class LauncherActivity extends Activity {
         } else {
             first = button(column, "Start game", null, v -> play(0));
         }
+        // Story slots (2026-11-20): one button per character whose automatic slot exists.
+        LinearLayout stories = null;
+        for (int c = 1; c <= 3; c++) {
+            final File f = StorySlots.file(this, c);
+            if (!f.isFile()) continue;
+            if (stories == null) {
+                stories = new LinearLayout(this);
+                stories.setOrientation(LinearLayout.HORIZONTAL);
+                column.addView(stories, new LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+            small(stories, "▶ " + StorySlots.NAMES[c], v -> playFile(f));
+        }
         // The less used actions share one row, so everything fits on a phone screen without scrolling.
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
@@ -322,6 +334,13 @@ public class LauncherActivity extends Activity {
         finish();
     }
 
+    private void playFile(File state) {
+        Intent i = new Intent(this, BbsActivity.class);
+        i.putExtra(BbsActivity.EXTRA_LOAD_FILE, state.getAbsolutePath());
+        startActivity(i);
+        finish();
+    }
+
     private void openSlots() {
         List<String> items = new ArrayList<>();
         List<Integer> slots = new ArrayList<>();
@@ -346,7 +365,7 @@ public class LauncherActivity extends Activity {
         String[] items = {
                 "Resolution: " + scale + "x" + (scale == 1 ? " (PSP original)" : ""),
                 "Aspect ratio: " + (wide ? "Phone screen (wider view)" : "16:9 (PSP original)"),
-                (fps60 ? "✓ " : "   ") + "60 FPS mode (experimental)",
+                (fps60 ? "✓ " : "   ") + "60 FPS mode",
                 (hd ? "✓ " : "   ") + "HD textures" + (hdInstalled ? "" : " (no pack installed: import one from the in-game menu)"),
                 (settings.getBoolean("invert_cam_x", false) ? "✓ " : "   ") + "Invert camera left/right",
                 (settings.getBoolean("invert_cam_y", false) ? "✓ " : "   ") + "Invert camera up/down",

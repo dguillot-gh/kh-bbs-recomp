@@ -18,9 +18,16 @@ RUNTIME=${PSPRECOMP_RUNTIME_DIR:-$REPO/runtime}
 PSPDECRYPT=${PSPDECRYPT_DIR:-$REPO/third_party/pspdecrypt}
 [ -f "$PSPDECRYPT/PrxDecrypter.cpp" ] || PSPDECRYPT=$REPO/../references/pspdecrypt
 
-# The supported dump (Kingdom Hearts: Birth by Sleep, USA, ULUS-10505, retail).
+# The supported dumps (2026-11-20: both build from the same scripts; the disc is told apart by UMD_DATA.BIN).
+# USA, ULUS-10505, retail:
 ISO_SHA1=0a61928fc0eaa78f169b4a172ba6165ecf8564a0
 EBOOT_DEC_SHA1=fd68f8dcd544fc2ae20028dedf59a67a6f012d38
+# Final Mix, Japan, ULJM-05775, with Truthkey's English patch v1.0.12 (the .chd converted to .iso with chdman).
+# Its EBOOT.BIN is a plain ELF (nothing to decrypt); the UNDUB release carries the same program as EBOOT.OLD.
+FM_ISO_SHA1=01240b99b5b8104299ad6f210cb49abaa385bf02
+FM_EBOOT_SHA1=857b241afa2b6099a8a8d2558863b5e5ce8a4f8e
+# Product code of the extracted disc (ULUS-10505 or ULJM-05775), empty before 1-EXTRACT.
+disc_id() { head -c 10 "$GAME_DIR/disc-files/UMD_DATA.BIN" 2>/dev/null || true; }
 LOAD_BASE=0x08804000
 UNIT_SIZE=0x8000
 

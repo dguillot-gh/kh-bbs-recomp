@@ -512,3 +512,24 @@ compile error for calls into units with nothing to dispatch.
 - 10/19: corpus generated, 113 units / 481,005 instructions / 281 import wrappers
   (needs regenerating, see above).
 - 10/23: per-title CMake project wired to `psp-native-runtime`. Configures fine.
+
+## 2026-11-19/20: Final Mix, boss checkpoint, story slots
+
+- **Final Mix (ULJM-05775, Truthkey English v1.0.12)** builds from the same scripts and plays on Android (60 FPS
+  and right-stick camera confirmed). The EBOOT is a plain ELF; DATs are unencrypted. Needed: SysMemUserForUser
+  0x1B4217BC/0x358CA1BB, Kernel_Library 0x1839852A (memcpy), scePower 0x469989AD/0xA85880D0/0x2085D15D; jal/j
+  targets from main code seeded into the overlay window (`wholedisc.py main-pointers`); the main corpus's last unit
+  (FM unit 109, 0x08B6C000-0x08B74000) overlaps the overlay window 0x08B6EE80-0x08BB4780, so `overlays.cpp` poisons
+  those dense-lookup buckets. FM loads MENU_CAMP and CAMP_MAIN side by side (the overlay swapper allows it).
+  Per-disc addresses: 60 FPS frame-mode word US 0x09F22E08 / FM 0x09F25EC8; camera hooks in
+  `scripts/patch-camera-mod.py`.
+- **Script-command hooks** (`scripts/patch-script-hooks.py`): BBS registers its Lua commands as {name, handler}
+  tables in the EBOOT; the script finds the handlers by name on either disc and inserts `bbs_script_command()` in
+  the generated code. Boss checkpoint: khlua's decompiled FM scripts show 36 of 55 boss scripts call
+  `Player.SetBossCamera("<id>")` once at boss creation (ids like `b01sw` = first boss, Dwarf Woodlands); the host
+  saves `files/states/boss.bbsstate` at the next safe point (60 s cooldown). Not yet seen firing in play.
+- **Story slots**: Player.GetHandle reads the player object at `*( *(ROOT) + 168 )`; GetPlayerID's helper returns
+  the halfword at +600 (flag 1: `(id - 1) % 3 + 1`). The game's PLAYER_ID_* constant table: Ventus 1, Aqua 2,
+  Terra 3. ROOT: US 0x08B74380, FM 0x08B5A4B0 (`scripts/find-story-addresses.py` derives and checks both).
+  Confirmed on FM 11-20: a Ventus state reads 1, an opening-battle state reads 3.
+- **HD ReMix 1.5.1** lists ULJM05775 in its `[games]`, so the same pack serves Final Mix.

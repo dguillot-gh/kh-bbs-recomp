@@ -46,6 +46,9 @@ done
 DISC_ID=$(head -c 10 "$DISC/UMD_DATA.BIN")
 "$PYTHON" -I "$(native "$REPO/scripts/patch-camera-mod.py")" "$(native "$GAME_DIR/generated")" "$DISC_ID" \
   || echo "warning: no right-stick camera hooks for $DISC_ID"
+# Script-command hooks (boss checkpoint, trace): handlers found from the EBOOT's own command tables.
+"$PYTHON" -I "$(native "$REPO/scripts/patch-script-hooks.py")" "$(native "$GAME_DIR/generated")" \
+  "$(native "$GAME_DIR/EBOOT.BIN.dec")"
 mkdir -p "$REPO/build"
 "$PYTHON" -I "$(native "$REPO/scripts/wholedisc.py")" report "$(native "$GAME_DIR/wholedisc.json")" \
   "$(native "$GAME_DIR/generated")" "$(native "$GAME_DIR/overlays")" "$(native "$REPO/build/wholedisc-report.txt")"

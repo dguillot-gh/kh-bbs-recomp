@@ -28,6 +28,8 @@ extern std::string g_bbs_state_path;
 extern std::atomic<bool> g_bbs_paused;
 extern std::atomic<std::uint64_t> g_bbs_flip_count;
 extern std::atomic<bool> g_bbs_60fps;
+extern std::atomic<std::uint32_t> g_bbs_boss_checkpoints;
+extern std::atomic<int> g_bbs_character;
 
 namespace {
 std::atomic<bool> g_started{false};
@@ -140,6 +142,16 @@ extern "C" JNIEXPORT void JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeSet60
 
 extern "C" JNIEXPORT jlong JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeFlipCount(JNIEnv *, jclass) {
     return static_cast<jlong>(g_bbs_flip_count.load(std::memory_order_relaxed));
+}
+
+// Boss checkpoints written so far (host/main.cpp): the app shows a notice when it goes up.
+extern "C" JNIEXPORT jint JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeBossCheckpoints(JNIEnv *, jclass) {
+    return static_cast<jint>(g_bbs_boss_checkpoints.load(std::memory_order_relaxed));
+}
+
+// Story slots: who is playing (host/main.cpp): 0 = not known, 1 Ventus, 2 Aqua, 3 Terra.
+extern "C" JNIEXPORT jint JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeCharacter(JNIEnv *, jclass) {
+    return static_cast<jint>(g_bbs_character.load(std::memory_order_relaxed));
 }
 
 extern "C" JNIEXPORT jboolean JNICALL Java_com_psprecomp_bbs_BbsActivity_nativeStart(JNIEnv *env, jclass,

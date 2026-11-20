@@ -38,6 +38,8 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
     private static final int STATE_SLOTS = 8;
     /** From the launcher (Continue / Load state): load this save-state slot once the game is running. */
     static final String EXTRA_LOAD_SLOT = "load_slot";
+    /** From the launcher ("Continue as Terra" ...): load this save-state file once the game is running. */
+    static final String EXTRA_LOAD_FILE = "load_file";
 
     private int touchButtons, keyButtons, hatButtons, triggerButtons;
     // Stick state in -1..1 (y down): touch stick, gamepad left/right sticks (raw; deadzone applied when sent).
@@ -57,6 +59,8 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
     static native int nativeStateResult();
     static native void nativeSetPaused(boolean paused);
     static native long nativeFlipCount();
+    static native int nativeBossCheckpoints();
+    static native int nativeCharacter();
     static native boolean nativeSetTextureReplacement(boolean on);
     static native void nativeSet60Fps(boolean on);
 
@@ -66,11 +70,14 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
     private boolean menuOpen, stateBusy, activityPaused;
     /** Texture pack (PPSSPP textures.ini) in getExternalFilesDir()/textures; on/off from the menu. */
     private boolean texturePack = true, texturePackLoaded;
-    /** 60 FPS mode (experimental): keeps BBS's vblank frame-interval word at 0 (native, see main.cpp). */
+    /** 60 FPS mode (confirmed on Final Mix 11-19): keeps BBS's vblank frame-interval word at 0 (native, see main.cpp). */
     private boolean fps60;
 
     // FPS: game frame flips per half second.
     private long lastFlips = -1, lastFlipTime;
+    private int lastBossCheckpoints = -1;
+    /** Story slots: the last character the game reported (1 Ventus, 2 Aqua, 3 Terra; 0 = none yet). */
+    private int character;
     private final Runnable fpsTick = new Runnable() {
         @Override public void run() {
             long now = System.nanoTime(), flips = started ? nativeFlipCount() : 0;
@@ -79,6 +86,15 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
             }
             lastFlips = flips;
             lastFlipTime = now;
+            if (started) {
+                int boss = nativeBossCheckpoints();
+                if (boss != lastBossCheckpoints && lastBossCheckpoints >= 0)
+                    Toast.makeText(BbsActivity.this, "Boss checkpoint saved (menu: Restart boss fight)",
+                            Toast.LENGTH_SHORT).show();
+                lastBossCheckpoints = boss;
+                int ch = nativeCharacter();
+                if (StorySlots.valid(ch)) character = ch;
+            }
             handler.postDelayed(this, 500);
         }
     };
@@ -113,6 +129,7 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
         super.onPause();
         activityPaused = true;
         updatePause();
+        saveStory(null);   // leaving the app: keep this character's story slot current
     }
 
     @Override
@@ -175,6 +192,7 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
             if (iso != null) android.system.Os.setenv("PSPRECOMP_ISO", iso.getAbsolutePath(), false);
             android.system.Os.setenv("PSPRECOMP_PGD_HELPER",
                     new File(getApplicationInfo().nativeLibraryDir, "libbbsdecrypt.so").getAbsolutePath(), true);
+            android.system.Os.setenv("PSPRECOMP_BOSS_STATE", bossFile().getAbsolutePath(), true);
         } catch (Exception e) {
             Log.e(TAG, "setenv", e);
         }
@@ -186,7 +204,15 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
         if (started) nativeSet60Fps(fps60);
         updatePause();
         final int loadSlot = getIntent().getIntExtra(EXTRA_LOAD_SLOT, 0);
-        if (started && loadSlot > 0 && stateFile(loadSlot).isFile()) {
+        final String loadFile = getIntent().getStringExtra(EXTRA_LOAD_FILE);
+        if (started && loadFile != null && new File(loadFile).isFile()) {
+            handler.postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (nativeFlipCount() < 30) { handler.postDelayed(this, 100); return; }
+                    runState(false, new File(loadFile), "Story loaded", null);
+                }
+            }, 100);
+        } else if (started && loadSlot > 0 && stateFile(loadSlot).isFile()) {
             // Launcher "Continue": load once the game has shown a few frames (its threads and the safe point exist).
             handler.postDelayed(new Runnable() {
                 @Override public void run() {
@@ -236,6 +262,10 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
                 "Resume",
                 "Save state…",
                 "Load state…",
+                "Restart boss fight" + (bossFile().isFile()
+                        ? "  (" + DateFormat.getTimeInstance(DateFormat.SHORT).format(new Date(bossFile().lastModified())) + ")"
+                        : "  (no boss yet)"),
+                "Switch story…" + (StorySlots.valid(character) ? "  (" + StorySlots.NAMES[character] + ")" : ""),
                 "Edit controls layout",
                 "Controls opacity…",
                 pad.controlsHidden() ? "Show touch controls" : "Hide touch controls (gamepad)",
@@ -245,12 +275,15 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
                 "Stick deadzone… (" + Math.round(deadzone * 100) + "%)",
                 "HD textures… (" + (!TexturePackInstaller.installed(getExternalFilesDir(null)) ? "not installed"
                         : texturePack ? "on" : "off") + ")",
-                (fps60 ? "✓ " : "   ") + "60 FPS mode (experimental)",
+                (fps60 ? "✓ " : "   ") + "60 FPS mode",
                 "Resolution… (" + settings.getInt("render_scale", 1) + "x)",
                 "Aspect ratio… (" + (settings.getBoolean("widescreen", false) ? "Phone screen" : "16:9") + ")",
                 "Quit to launcher",
         };
-        AlertDialog d = dialog().setTitle("Birth by Sleep").setItems(items, (x, which) -> {
+        AlertDialog d = dialog().setTitle("Birth by Sleep").setItems(items, (x, picked) -> {
+            if (picked == 3) { restartBoss(); return; }
+            if (picked == 4) { switchStory(); return; }
+            final int which = picked > 4 ? picked - 2 : picked;   // items after "Switch story" keep their cases
             switch (which) {
                 case 1: openSlots(true); break;
                 case 2: openSlots(false); break;
@@ -274,8 +307,10 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
                 case 13: openAspect(); break;
                 case 14:
                     showDialog(dialog().setTitle("Quit to the launcher?")
-                            .setMessage("Unsaved progress is lost. Save a state first if you want to keep it.")
-                            .setPositiveButton("Quit", (y, w) -> quitToLauncher())
+                            .setMessage(StorySlots.valid(character)
+                                    ? StorySlots.NAMES[character] + "'s story slot is saved first."
+                                    : "Unsaved progress is lost. Save a state first if you want to keep it.")
+                            .setPositiveButton("Quit", (y, w) -> saveStory(this::quitToLauncher))
                             .setNegativeButton("Cancel", null).create());
                     break;
                 default: break;
@@ -457,6 +492,26 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
         Runtime.getRuntime().exit(0);
     }
 
+    /** The automatic boss checkpoint (host/main.cpp writes it when a boss fight starts). */
+    private File bossFile() {
+        File dir = new File(getFilesDir(), "states");
+        //noinspection ResultOfMethodCallIgnored
+        dir.mkdirs();
+        return new File(dir, "boss.bbsstate");
+    }
+
+    private void restartBoss() {
+        if (!bossFile().isFile()) {
+            Toast.makeText(this, "No boss checkpoint yet: it's saved automatically when a boss fight starts",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        showDialog(dialog().setTitle("Restart the boss fight?")
+                .setMessage("Goes back to the start of the last boss fight. Progress since then is lost.")
+                .setPositiveButton("Restart", (y, w) -> runState(false, bossFile(), "Boss fight restarted"))
+                .setNegativeButton("Cancel", null).create());
+    }
+
     private File stateFile(int slot) {
         File dir = new File(getFilesDir(), "states");
         //noinspection ResultOfMethodCallIgnored
@@ -491,25 +546,102 @@ public class BbsActivity extends Activity implements SurfaceHolder.Callback {
 
     /** Asks the game thread to save/load at its next vblank wait and reports the result. */
     private void runState(boolean save, int slot) {
+        runState(save, stateFile(slot), save ? "Saved to slot " + slot : "Loaded slot " + slot,
+                save ? () -> copyToStory(stateFile(slot)) : null);
+    }
+
+    private void runState(boolean save, File file, String what) { runState(save, file, what, null); }
+
+    /** Then runs only after a successful save/load. */
+    private void runState(boolean save, File file, String what, Runnable then) {
         if (!started || stateBusy) return;
         stateBusy = true;
         menuOpen = true;          // stay paused until it is done
         updatePause();
-        nativeRequestState(save ? 1 : 2, stateFile(slot).getAbsolutePath());
+        nativeRequestState(save ? 1 : 2, file.getAbsolutePath());
         final long deadline = System.currentTimeMillis() + 15000;
         handler.postDelayed(new Runnable() {
             @Override public void run() {
                 int r = nativeStateResult();
                 if (r == 0 && System.currentTimeMillis() < deadline) { handler.postDelayed(this, 100); return; }
                 stateBusy = false;
-                String what = save ? "Saved to slot " + slot : "Loaded slot " + slot;
                 String msg = r == 1 ? what
                         : r == 0 ? "The game is busy (loading?). Try again in a moment."
                         : (save ? "Save failed" : "Load failed: the state is from an incompatible build");
                 Toast.makeText(BbsActivity.this, msg, Toast.LENGTH_SHORT).show();
+                // After a load the game may be another character: forget it until host/main.cpp reports again
+                // (fpsTick), so a story save can never go to the wrong character's slot.
+                if (r == 1 && !save) character = 0;
                 maybeResume();
+                if (r == 1 && then != null) then.run();
             }
         }, 100);
+    }
+
+    // ---- story slots (StorySlots) ----
+
+    /** Saves the playing character's story slot without a notice, then runs then (also when there is nothing to save). */
+    private void saveStory(Runnable then) {
+        if (!started || stateBusy || !StorySlots.valid(character)) { if (then != null) then.run(); return; }
+        stateBusy = true;
+        final File file = StorySlots.file(this, character);
+        nativeRequestState(1, file.getAbsolutePath());
+        final long deadline = System.currentTimeMillis() + 15000;
+        handler.postDelayed(new Runnable() {
+            @Override public void run() {
+                int r = nativeStateResult();
+                if (r == 0 && System.currentTimeMillis() < deadline) { handler.postDelayed(this, 100); return; }
+                stateBusy = false;
+                android.util.Log.i(TAG, "story slot " + file.getName() + (r == 1 ? " saved" : " not saved (" + r + ")"));
+                if (then != null) then.run();
+            }
+        }, 100);
+    }
+
+    /** A manual save also refreshes the playing character's story slot (copied off the UI thread). */
+    private void copyToStory(File saved) {
+        if (!StorySlots.valid(character)) return;
+        final File target = StorySlots.file(this, character);
+        new Thread(() -> {
+            File tmp = new File(target.getPath() + ".tmp");
+            try (java.io.InputStream in = new java.io.FileInputStream(saved);
+                 java.io.OutputStream out = new java.io.FileOutputStream(tmp)) {
+                byte[] buf = new byte[1 << 20];
+                for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
+            } catch (java.io.IOException e) {
+                android.util.Log.w(TAG, "story copy failed", e);
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
+                return;
+            }
+            //noinspection ResultOfMethodCallIgnored
+            tmp.renameTo(target);
+        }, "story-copy").start();
+    }
+
+    private void switchStory() {
+        String[] items = new String[3];
+        DateFormat fmt = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT);
+        for (int c = 1; c <= 3; c++) {
+            File f = StorySlots.file(this, c);
+            items[c - 1] = StorySlots.NAMES[c] + "  —  " + (c == character ? "playing now"
+                    : f.isFile() ? fmt.format(new Date(f.lastModified())) : "no story slot yet");
+        }
+        showDialog(dialog().setTitle("Switch story").setItems(items, (x, which) -> {
+            final int target = which + 1;
+            if (target == character) {
+                Toast.makeText(this, "You're playing " + StorySlots.NAMES[target] + "'s story", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            final File f = StorySlots.file(this, target);
+            if (!f.isFile()) {
+                Toast.makeText(this, StorySlots.NAMES[target] + "'s slot fills itself the first time you play "
+                        + StorySlots.NAMES[target] + " (load that story from the title screen once).", Toast.LENGTH_LONG).show();
+                return;
+            }
+            // Keep the current story, then jump to the other one.
+            saveStory(() -> runState(false, f, "Switched to " + StorySlots.NAMES[target] + "'s story", null));
+        }).setNegativeButton("Back", null).create());
     }
 
     private SeekBar slider(int max, int value) {
